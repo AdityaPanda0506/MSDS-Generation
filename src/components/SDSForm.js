@@ -9,7 +9,7 @@ export default function SDSForm() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  const API_BASE = "http://localhost:5000"; // Flask backend
+  const API_BASE = "https://msds-generation-2.onrender.com"; // Flask backend
 
   const handleSubmit = async () => {
     setLoading(true);
@@ -150,3 +150,4 @@ function SDSDisplay({ sds }) {
     </div>
   );
 }
+
