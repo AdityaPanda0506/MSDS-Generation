@@ -3,4 +3,5 @@ uvicorn
 pdfkit
 pubchempy
 pandas
+Flask
 gunicorn
