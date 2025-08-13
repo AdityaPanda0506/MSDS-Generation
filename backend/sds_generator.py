@@ -459,3 +459,91 @@ def generate_pdf(sds, compound_name="Unknown Compound"):
         # Clean up temporary HTML
         if os.path.exists(temp_html):
             os.remove(temp_html)
+
+def generate_docx(sds, compound_name="Unknown Compound"):
+    """
+    Generate a .docx file in memory and return its bytes for Streamlit download.
+    """
+    from docx import Document
+    from docx.shared import Pt, Inches
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.enum.section import WD_ORIENT
+    from datetime import datetime
+    import io
+
+    # Create a new Document
+    doc = Document()
+
+    # Set margins
+    sections = doc.sections
+    for section in sections:
+        section.left_margin = Inches(1)
+        section.right_margin = Inches(1)
+        section.top_margin = Inches(0.8)
+        section.bottom_margin = Inches(0.8)
+
+    # Title
+    title = doc.add_heading('Safety Data Sheet (SDS)', 0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    subtitle = doc.add_paragraph(f"Compound: {compound_name}")
+    subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    generated_on = datetime.now().strftime("%Y-%m-%d %H:%M")
+    p = doc.add_paragraph(f"Generated on: {generated_on}", style='Caption')
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    doc.add_paragraph()  # Spacer
+
+    # Add all 16 sections
+    for i in range(1, 17):
+        section_key = f"Section{i}"
+        section = sds.get(section_key, {})
+        title = section.get("title", f"Section {i}")
+
+        # Section header
+        doc.add_heading(f"{i}. {title}", level=1)
+
+        data = section.get("data", {})
+        if not data:
+            doc.add_paragraph("No data available.")
+        else:
+            table = doc.add_table(rows=0, cols=2)
+            table.style = 'Table Grid'
+            for key, value in data.items():
+                row = table.add_row()
+                cell_key = row.cells[0]
+                cell_val = row.cells[1]
+
+                # Bold key
+                p_key = cell_key.paragraphs[0]
+                run_key = p_key.add_run(str(key))
+                run_key.bold = True
+
+                # Format value
+                if isinstance(value, list):
+                    val_text = ", ".join([str(v) for v in value if v]) or "Not available"
+                elif not value or value == "Not available":
+                    val_text = "Not available"
+                else:
+                    val_text = str(value)
+
+                cell_val.text = val_text
+
+        doc.add_paragraph()  # Space between sections
+
+    # Footer / Disclaimer
+    disclaimer = doc.add_paragraph()
+    run = disclaimer.add_run(
+        "Disclaimer: This report is generated for research use only. "
+        "Verify with lab testing and official sources before handling chemicals."
+    )
+    run.italic = True
+    disclaimer.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    # Save to BytesIO buffer
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)  # Important: go to the beginning of the file
+
+    return buffer
