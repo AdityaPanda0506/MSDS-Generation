@@ -1,28 +1,28 @@
 # backend/main.py
-from flask import Flask, request, jsonify, send_file, make_response
-from flask_cors import CORS  # To allow React frontend
+from flask import Flask, request, jsonify, send_file
+from flask_cors import CORS
 import json
 import os
-import tempfile
+from io import BytesIO
 
 # Import your core logic
-from sds_generator import generate_sds, generate_pdf
+from sds_generator import generate_sds, generate_docx  # Updated: generate_docx returns BytesIO
 
 app = Flask(__name__)
-CORS(app)  # Allow requests from React (localhost:3000)
+CORS(app)  # Allow React frontend (localhost:3000)
 
 @app.route('/api/sds', methods=['GET'])
 def get_sds():
+    """Return SDS data as JSON (for preview or processing)"""
     smiles = request.args.get('smiles', '').strip()
     if not smiles:
         return jsonify({"error": "SMILES string is required"}), 400
 
-    mol = None
     try:
         from rdkit import Chem
         mol = Chem.MolFromSmiles(smiles)
     except Exception as e:
-        pass
+        return jsonify({"error": "RDKit initialization failed", "details": str(e)}), 500
 
     if mol is None:
         return jsonify({"error": "Invalid SMILES format"}), 400
@@ -33,47 +33,20 @@ def get_sds():
 
     return jsonify(sds)
 
-@app.route('/api/sds/pdf', methods=['GET'])
-def get_pdf():
+
+@app.route('/api/sds/docx', methods=['GET'])
+def get_docx():
+    """Generate and return SDS as a downloadable Word (.docx) document"""
     smiles = request.args.get('smiles', '').strip()
     if not smiles:
         return jsonify({"error": "SMILES string is required"}), 400
 
-    from rdkit import Chem
-    mol = Chem.MolFromSmiles(smiles)
-    if mol is None:
-        return jsonify({"error": "Invalid SMILES"}), 400
+    try:
+        from rdkit import Chem
+        mol = Chem.MolFromSmiles(smiles)
+    except Exception as e:
+        return jsonify({"error": "RDKit error", "details": str(e)}), 500
 
-    sds = generate_sds(smiles)
-    compound_name = sds["Section1"]["data"].get("Product Identifier", "Unknown_Compound")
-
-    # Generate PDF
-    pdf_path = generate_pdf(sds, compound_name)
-    if not pdf_path or not os.path.exists(pdf_path):
-        return jsonify({"error": "PDF generation failed"}), 500
-
-    # Serve the PDF
-    response = make_response(send_file(pdf_path, as_attachment=True, 
-                                       download_name=f"SDS_{compound_name}.pdf", 
-                                       mimetype='application/pdf'))
-    # Optional: Delete file after sending
-    @response.call_on_close
-    def cleanup():
-        try:
-            os.remove(pdf_path)
-        except:
-            pass
-
-    return response
-
-@app.route('/api/sds/json', methods=['GET'])
-def get_json():
-    smiles = request.args.get('smiles', '').strip()
-    if not smiles:
-        return jsonify({"error": "SMILES string is required"}), 400
-
-    from rdkit import Chem
-    mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         return jsonify({"error": "Invalid SMILES"}), 400
 
@@ -81,21 +54,67 @@ def get_json():
     if sds is None:
         return jsonify({"error": "Failed to generate SDS"}), 500
 
-    # Return JSON directly
-    response = app.response_class(
-        response=json.dumps(sds, indent=2),
-        mimetype='application/json',
-        headers={'Content-Disposition': f'attachment; filename=sds_{compound_name}.json'}
+    compound_name = sds["Section1"]["data"].get("Product Identifier", "Unknown_Compound")
+
+    # Generate DOCX in memory
+    try:
+        docx_buffer = generate_docx(sds, compound_name)
+    except Exception as e:
+        return jsonify({"error": "DOCX generation failed", "details": str(e)}), 500
+
+    # Send file directly from memory
+    return send_file(
+        docx_buffer,
+        as_attachment=True,
+        download_name=f"SDS_{compound_name}.docx",
+        mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     )
-    return response
+
+
+@app.route('/api/sds/json', methods=['GET'])
+def get_json():
+    """Return SDS as downloadable JSON file"""
+    smiles = request.args.get('smiles', '').strip()
+    if not smiles:
+        return jsonify({"error": "SMILES string is required"}), 400
+
+    try:
+        from rdkit import Chem
+        mol = Chem.MolFromSmiles(smiles)
+    except Exception as e:
+        return jsonify({"error": "RDKit error", "details": str(e)}), 500
+
+    if mol is None:
+        return jsonify({"error": "Invalid SMILES"}), 400
+
+    sds = generate_sds(smiles)
+    if sds is None:
+        return jsonify({"error": "Failed to generate SDS"}), 500
+
+    compound_name = sds["Section1"]["data"].get("Product Identifier", "Unknown_Compound")
+
+    # Serialize to JSON and serve as file
+    json_data = json.dumps(sds, indent=2)
+    buffer = BytesIO(json_data.encode('utf-8'))
+    buffer.seek(0)
+
+    return send_file(
+        buffer,
+        as_attachment=True,
+        download_name=f"sds_{compound_name}.json",
+        mimetype='application/json'
+    )
+
 
 @app.route('/api/health', methods=['GET'])
 def health():
+    """Health check endpoint"""
     return jsonify({"status": "ok", "message": "Backend is running"}), 200
 
+
 if __name__ == '__main__':
-    # Create temp dir if not exists
+    # Ensure temp directory exists (optional, if you ever use it)
     os.makedirs('temp', exist_ok=True)
     print("✅ Backend running at http://localhost:5000")
-    print("🎯 Connect React to http://localhost:5000")
+    print("🎯 Connect React frontend to http://localhost:5000")
     app.run(host='127.0.0.1', port=5000, debug=True)
