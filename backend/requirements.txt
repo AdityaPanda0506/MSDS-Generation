@@ -5,3 +5,5 @@ pubchempy
 pandas
 Flask
 gunicorn
+Flask-Cors
+numpy
