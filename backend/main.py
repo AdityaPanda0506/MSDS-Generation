@@ -106,6 +106,67 @@ def get_json():
     )
 
 
+@app.route('/api/sds/pdf', methods=['GET'])
+def get_pdf():
+    """Generate and return SDS as a very simple PDF (placeholder implementation)."""
+    smiles = request.args.get('smiles', '').strip()
+    if not smiles:
+        return jsonify({"error": "SMILES string is required"}), 400
+
+    try:
+        from rdkit import Chem
+        mol = Chem.MolFromSmiles(smiles)
+    except Exception as e:
+        return jsonify({"error": "RDKit error", "details": str(e)}), 500
+
+    if mol is None:
+        return jsonify({"error": "Invalid SMILES"}), 400
+
+    sds = generate_sds(smiles)
+    if sds is None:
+        return jsonify({"error": "Failed to generate SDS"}), 500
+
+    compound_name = sds["Section1"]["data"].get("Product Identifier", "Unknown_Compound")
+
+    # Simple PDF generation using reportlab (fallback text-only)
+    try:
+        from reportlab.lib.pagesizes import letter
+        from reportlab.pdfgen import canvas
+        pdf_buffer = BytesIO()
+        c = canvas.Canvas(pdf_buffer, pagesize=letter)
+        width, height = letter
+        y = height - 50
+        c.setFont("Helvetica-Bold", 14)
+        c.drawString(50, y, f"Safety Data Sheet: {compound_name}")
+        y -= 30
+        c.setFont("Helvetica", 9)
+        for section_key, section in sds.items():
+            title = section.get('title', section_key)
+            c.setFont("Helvetica-Bold", 11)
+            if y < 80:
+                c.showPage(); y = height - 50
+            c.drawString(50, y, title)
+            y -= 16
+            c.setFont("Helvetica", 8)
+            for k, v in section.get('data', {}).items():
+                line = f"{k}: {v if not isinstance(v, list) else ', '.join(map(str, v))}"[:180]
+                if y < 60:
+                    c.showPage(); y = height - 50; c.setFont("Helvetica", 8)
+                c.drawString(60, y, line)
+                y -= 12
+        c.save()
+        pdf_buffer.seek(0)
+    except Exception as e:
+        return jsonify({"error": "PDF generation failed", "details": str(e)}), 500
+
+    return send_file(
+        pdf_buffer,
+        as_attachment=True,
+        download_name=f"SDS_{compound_name}.pdf",
+        mimetype='application/pdf'
+    )
+
+
 @app.route('/api/health', methods=['GET'])
 def health():
     """Health check endpoint"""

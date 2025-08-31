@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import axios from 'axios';
+// Removed unused axios import
 
 import { FaExclamationTriangle } from 'react-icons/fa';
 
@@ -9,7 +9,8 @@ export default function SDSForm() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  const API_BASE = "https://msds-generation-2.onrender.com"; // Flask backend
+  // Prefer local backend during development; override via REACT_APP_API_BASE
+  const API_BASE = process.env.REACT_APP_API_BASE || "http://localhost:5000"; // Flask backend
 
   const handleSubmit = async () => {
     setLoading(true);
@@ -35,8 +36,12 @@ export default function SDSForm() {
 
   const downloadPDF = () => {
     if (!smiles.trim()) return;
-    // ✅ FIXED: Use /api/sds/pdf
     window.open(`${API_BASE}/api/sds/pdf?smiles=${encodeURIComponent(smiles)}`, '_blank');
+  };
+
+  const downloadDOCX = () => {
+    if (!smiles.trim()) return;
+    window.open(`${API_BASE}/api/sds/docx?smiles=${encodeURIComponent(smiles)}`, '_blank');
   };
 
   const downloadJSON = async () => {
@@ -85,10 +90,13 @@ export default function SDSForm() {
         <div>
           <div className="flex gap-3 mb-6">
             <button onClick={downloadPDF} className="flex-1 bg-green-600 text-white py-2 rounded hover:bg-green-700">
-              📄 Download PDF
+              📄 PDF
+            </button>
+            <button onClick={downloadDOCX} className="flex-1 bg-indigo-600 text-white py-2 rounded hover:bg-indigo-700">
+              📄 DOCX
             </button>
             <button onClick={downloadJSON} className="flex-1 bg-gray-600 text-white py-2 rounded hover:bg-gray-700">
-              📥 Download JSON
+              📥 JSON
             </button>
           </div>
 

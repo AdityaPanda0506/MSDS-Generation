@@ -10,6 +10,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.shared import RGBColor
 from docx.oxml import OxmlElement
+import os  # Added for environment-based dynamic section data
 
 
 # -----------------------------
@@ -96,7 +97,11 @@ def get_echa_preferred_name(cas_number=None, compound_name=None):
 def get_detailed_safety_data_from_pubchem(cid):
     """
     Fetch real safety data from PubChem PUG-View API
-    Returns a dict with real values for SDS sections
+    Returns a dict with real values for SDS sections. We attempt to mine
+    granular textual data for multiple SDS sections so that hardcoded
+    defaults in downstream generation can be minimized. Any field that is
+    not found will remain empty and later be backfilled with a sensible
+    fallback.
     """
     url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug_view/data/compound/{cid}/JSON"
     data = {
@@ -108,7 +113,13 @@ def get_detailed_safety_data_from_pubchem(cid):
         "stability_reactivity": {},
         "disposal": {},
         "transport": {},
-        "regulatory": {}
+        "regulatory": {},
+        # Newly added richer dynamic sections
+        "hazards_identification": {},
+        "physical_properties": {},
+        "toxicological": {},
+        "ecological": {},
+        "composition": {}
     }
     try:
         import requests
@@ -118,101 +129,152 @@ def get_detailed_safety_data_from_pubchem(cid):
             return data
 
         json_data = response.json()
-
-        def find_in_section(section, target_headings):
-            """Search for specific heading and return its Information as strings"""
-            if "TOCHeading" in section:
-                heading = section["TOCHeading"]
-                if any(t in heading for t in target_headings):
-                    values = []
-                    if "Information" in section:
-                        for info in section["Information"]:
-                            val = info.get("Value", {})
-                            if "StringWithMarkup" in val:
-                                for swm in val["StringWithMarkup"]:
-                                    if "String" in swm:
-                                        values.append(swm["String"])
-                    return " | ".join(values) if values else "Not available"
+        # ------------------------------------------------------------------
+        # Generic recursive utilities for mining PubChem PUG-View JSON
+        # ------------------------------------------------------------------
+        def collect_all(section, target_fragments, accum):
+            """Accumulate all strings for headings containing any fragment."""
+            heading = section.get("TOCHeading", "")
+            matched = any(frag.lower() in heading.lower() for frag in target_fragments)
+            if matched:
+                for info in section.get("Information", []):
+                    val = info.get("Value", {})
+                    if "StringWithMarkup" in val:
+                        for swm in val["StringWithMarkup"]:
+                            s = swm.get("String")
+                            if s and s not in accum:
+                                accum.append(s.strip())
             for sub in section.get("Section", []):
-                result = find_in_section(sub, target_headings)
-                if result != "Not available":
-                    return result
-            return "Not available"
+                collect_all(sub, target_fragments, accum)
+
+        def first_match(section, target_fragments):
+            temp = []
+            collect_all(section, target_fragments, temp)
+            return temp[0] if temp else "Not available"
+
+        def all_matches(section, target_fragments):
+            temp = []
+            collect_all(section, target_fragments, temp)
+            return temp
+
+        # Helper to set dict only if still empty (preserve first found block)
+        def ensure_block(block_key, mapping):
+            if not data[block_key]:
+                data[block_key] = mapping
 
         # Map section headings to PubChem equivalents
         for sec in json_data.get("Record", {}).get("Section", []):
             # Section 4: First Aid Measures
-            if not data["first_aid"]:
-                data["first_aid"] = {
-                    "Inhalation": find_in_section(sec, ["Inhalation"]),
-                    "Skin Contact": find_in_section(sec, ["Skin", "Dermal"]),
-                    "Eye Contact": find_in_section(sec, ["Eye", "Ocular"]),
-                    "Ingestion": find_in_section(sec, ["Ingestion", "Swallow"]),
-                }
+            ensure_block("first_aid", {
+                "Inhalation": first_match(sec, ["Inhalation"]),
+                "Skin Contact": first_match(sec, ["Skin", "Dermal"]),
+                "Eye Contact": first_match(sec, ["Eye", "Ocular"]),
+                "Ingestion": first_match(sec, ["Ingestion", "Swallow"]),
+            })
 
             # Section 5: Fire Fighting
-            if not data["fire_fighting"]:
-                data["fire_fighting"] = {
-                    "Extinguishing Media": find_in_section(sec, ["Extinguishing Media", "Fire Fighting"]),
-                    "Special Hazards": find_in_section(sec, ["Hazardous Combustion Products", "Special Hazards"])
-                }
+            ensure_block("fire_fighting", {
+                "Extinguishing Media": first_match(sec, ["Extinguishing Media", "Fire Fighting"]),
+                "Special Hazards": first_match(sec, ["Hazardous Combustion Products", "Special Hazards"])
+            })
 
             # Section 6: Accidental Release
-            if not data["accidental_release"]:
-                data["accidental_release"] = {
-                    "Personal Precautions": find_in_section(sec, ["Personal Precautions", "Protective Measures"]),
-                    "Environmental Precautions": find_in_section(sec, ["Environmental Precautions"]),
-                    "Methods of Containment": find_in_section(sec, ["Spill", "Release", "Containment"])
-                }
+            ensure_block("accidental_release", {
+                "Personal Precautions": first_match(sec, ["Personal Precautions", "Protective Measures"]),
+                "Environmental Precautions": first_match(sec, ["Environmental Precautions"]),
+                "Methods of Containment": first_match(sec, ["Spill", "Release", "Containment"])
+            })
 
             # Section 7: Handling and Storage
-            if not data["handling_storage"]:
-                data["handling_storage"] = {
-                    "Handling": find_in_section(sec, ["Handling", "Precautions for Safe Handling"]),
-                    "Storage": find_in_section(sec, ["Storage", "Conditions for Safe Storage"])
-                }
+            ensure_block("handling_storage", {
+                "Handling": first_match(sec, ["Handling", "Precautions for Safe Handling"]),
+                "Storage": first_match(sec, ["Storage", "Conditions for Safe Storage"])
+            })
 
             # Section 8: Exposure Controls
-            if not data["exposure_controls"]:
-                data["exposure_controls"] = {
-                    "TLV-TWA": find_in_section(sec, ["TLV", "Threshold Limit Value"]),
-                    "Engineering Controls": find_in_section(sec, ["Engineering Controls"]),
-                    "Personal Protection": find_in_section(sec, ["Personal Protection", "Protective Equipment"])
-                }
+            ensure_block("exposure_controls", {
+                "TLV-TWA": first_match(sec, ["TLV", "Threshold Limit Value"]),
+                "Engineering Controls": first_match(sec, ["Engineering Controls"]),
+                "Personal Protection": first_match(sec, ["Personal Protection", "Protective Equipment"])
+            })
 
             # Section 10: Stability and Reactivity
-            if not data["stability_reactivity"]:
-                data["stability_reactivity"] = {
-                    "Stability": find_in_section(sec, ["Stability", "Chemical Stability"]),
-                    "Conditions to Avoid": find_in_section(sec, ["Conditions to Avoid"]),
-                    "Incompatible Materials": find_in_section(sec, ["Incompatible Materials", "Reactivity"]),
-                    "Hazardous Decomposition": find_in_section(sec, ["Hazardous Decomposition", "Combustion Products"])
-                }
+            ensure_block("stability_reactivity", {
+                "Stability": first_match(sec, ["Stability", "Chemical Stability"]),
+                "Conditions to Avoid": first_match(sec, ["Conditions to Avoid"]),
+                "Incompatible Materials": first_match(sec, ["Incompatible Materials", "Reactivity"]),
+                "Hazardous Decomposition": first_match(sec, ["Hazardous Decomposition", "Combustion Products"])
+            })
 
             # Section 13: Disposal
-            if not data["disposal"]:
-                data["disposal"] = {
-                    "Disposal Method": find_in_section(sec, ["Disposal", "Waste Disposal"]),
-                    "Contaminated Packaging": find_in_section(sec, ["Contaminated Packaging"])
-                }
+            ensure_block("disposal", {
+                "Disposal Method": first_match(sec, ["Disposal", "Waste Disposal"]),
+                "Contaminated Packaging": first_match(sec, ["Contaminated Packaging"])
+            })
 
             # Section 14: Transport
-            if not data["transport"]:
-                data["transport"] = {
-                    "UN Number": find_in_section(sec, ["UN Number"]),
-                    "Proper Shipping Name": find_in_section(sec, ["Proper Shipping Name"]),
-                    "Transport Hazard Class": find_in_section(sec, ["Hazard Class", "Transport Hazard"]),
-                    "Packing Group": find_in_section(sec, ["Packing Group"])
-                }
+            ensure_block("transport", {
+                "UN Number": first_match(sec, ["UN Number"]),
+                "Proper Shipping Name": first_match(sec, ["Proper Shipping Name"]),
+                "Transport Hazard Class": first_match(sec, ["Hazard Class", "Transport Hazard"]),
+                "Packing Group": first_match(sec, ["Packing Group"])
+            })
 
             # Section 15: Regulatory
-            if not data["regulatory"]:
-                data["regulatory"] = {
-                    "TSCA": find_in_section(sec, ["TSCA"]),
-                    "DSL": find_in_section(sec, ["DSL"]),
-                    "WHMIS": find_in_section(sec, ["WHMIS"]),
-                    "GHS Regulation": find_in_section(sec, ["GHS", "Globally Harmonized System"])
+            ensure_block("regulatory", {
+                "TSCA": first_match(sec, ["TSCA"]),
+                "DSL": first_match(sec, ["DSL"]),
+                "WHMIS": first_match(sec, ["WHMIS"]),
+                "GHS Regulation": first_match(sec, ["GHS", "Globally Harmonized System"])
+            })
+
+            # Section 3: Hazards Identification (GHS) – gather lists
+            if not data["hazards_identification"]:
+                hazard_statements = all_matches(sec, ["Hazard Statements", "GHS Hazard", "H3"])
+                signal_word = first_match(sec, ["Signal Word"])
+                pictograms = all_matches(sec, ["Pictogram", "GHS Pictogram"])
+                data["hazards_identification"] = {
+                    "Signal Word": signal_word,
+                    "Hazard Statements": hazard_statements,
+                    "GHS Pictograms": pictograms,
                 }
+
+            # Section 9: Physical & Chemical Properties
+            if not data["physical_properties"]:
+                data["physical_properties"] = {
+                    "Melting Point": first_match(sec, ["Melting Point"]),
+                    "Boiling Point": first_match(sec, ["Boiling Point"]),
+                    "Density": first_match(sec, ["Density"]),
+                    "Vapor Pressure": first_match(sec, ["Vapor Pressure"]),
+                    "Solubility in Water": first_match(sec, ["Solubility", "Water Solubility"])
+                }
+
+            # Section 11: Toxicological Information
+            if not data["toxicological"]:
+                ld50s = all_matches(sec, ["LD50", "Lethal Dose"])
+                lc50s = all_matches(sec, ["LC50", "Lethal Concentration"])
+                carcinogenicity = first_match(sec, ["Carcinogenicity"])
+                mutagenicity = first_match(sec, ["Mutagenicity"])
+                data["toxicological"] = {
+                    "LD50 Entries": ld50s,
+                    "LC50 Entries": lc50s,
+                    "Carcinogenicity": carcinogenicity,
+                    "Mutagenicity": mutagenicity
+                }
+
+            # Section 12: Ecological Information
+            if not data["ecological"]:
+                data["ecological"] = {
+                    "Ecotoxicity": first_match(sec, ["Ecotoxicity", "Aquatic"],),
+                    "Persistence": first_match(sec, ["Persistence", "Degradation"]),
+                    "Bioaccumulation": first_match(sec, ["Bioaccumulation", "BCF"])
+                }
+
+            # Section 2: Composition – Synonyms/Names
+            if not data["composition"]:
+                synonyms = all_matches(sec, ["Synonym", "Name", "Other Identifiers"])
+                if synonyms:
+                    data["composition"] = {"Synonyms": synonyms[:25]}  # limit to keep concise
 
     except Exception as e:
         print(f"Error fetching detailed safety data: {e}")
@@ -368,21 +430,32 @@ def get_pubchem_data(smiles):
             display_name = best_name
 
         # --- Return Final Data ---
+        # Truncate synonyms list for inclusion (avoid overly long output)
+        limited_synonyms = []
+        if hasattr(c, 'synonyms') and c.synonyms:
+            for syn in c.synonyms:
+                if syn and syn not in limited_synonyms:
+                    limited_synonyms.append(syn)
+                if len(limited_synonyms) >= 30:  # cap to keep payload reasonable
+                    break
+
         return {
             "name": display_name,
+            "common_name": best_name,
             "formula": c.molecular_formula or "Not available",
             "mw": mw_val,
             "cas": getattr(c, 'cas', "Not available"),
+            "cid": c.cid,
             "logp": round(logp_val, 2),
             "solubility": solubility,
             "h_bond_donor": rdMolDescriptors.CalcNumHBD(mol),
             "h_bond_acceptor": rdMolDescriptors.CalcNumHBA(mol),
             "botanical_sources": botanical_names,
-            "common_name": best_name,
+            "synonyms": limited_synonyms,
             "melting_point": melting_point,
             "boiling_point": boiling_point,
-            "safety_data": safety_data,  
-            }
+            "safety_data": safety_data,
+        }
         
 
     except Exception as e:
@@ -466,6 +539,7 @@ def generate_sds(smiles):
     pubchem = get_pubchem_data(smiles)
     protx = predict_toxicity_protx(smiles)
     props = get_physical_properties(mol)
+    safety_data = pubchem.get("safety_data", {})  # Detailed safety sections from PubChem
 
     # -------------------------------------------------------------------------
     # ✅ INSERT ECHA NAME ENHANCEMENT HERE
@@ -492,112 +566,158 @@ def generate_sds(smiles):
         } for i in range(1, 17)
     }
 
-    # Section 1
-    # Section 1: Chemical Product and Company Identification
+    # Section 1 – Chemical Product and Company Identification (now dynamic)
+    supplier_name = os.getenv("SDS_SUPPLIER_NAME", "Automated SDS Generator")
+    supplier_address = os.getenv("SDS_SUPPLIER_ADDRESS", "N/A")
+    emergency_phone = os.getenv("SDS_SUPPLIER_EMERGENCY_PHONE", "N/A")
     botanical_sources = pubchem.get("botanical_sources", [])
-    botanical_name_display = ", ".join(botanical_sources) if botanical_sources else "Not applicable"
-
+    synonyms_full = pubchem.get("synonyms", []) or []
     sds["Section1"]["data"] = {
         "Product Identifier": pubchem.get("name", "Unknown Compound"),
-        "Company": "Automated SDS Generator",
-        "Address": "N/A",
-        "Emergency Phone": "N/A",
-    }
-
-    # Section 2
-    sds["Section2"]["data"] = {
-        "Name": pubchem.get("name", "Unknown"),
+        "Common Name": pubchem.get("common_name", pubchem.get("name", "Unknown")),
+        "Synonyms (sample)": ", ".join(synonyms_full[:5]) if synonyms_full else "Not available",
+        "Botanical Sources": ", ".join(botanical_sources) if botanical_sources else "Not applicable",
+        "PubChem CID": pubchem.get("cid", "Not available"),
         "CAS Number": pubchem.get("cas", "Not available"),
         "Molecular Formula": pubchem.get("formula", "Not available"),
-        "Purity/Concentration": "100% (pure compound)"
+        "Molecular Weight": f"{pubchem.get('mw'):.2f} g/mol" if pubchem.get("mw") else "Not available",
+        "LogP": pubchem.get("logp", "Not available"),
+        "Supplier": supplier_name,
+        "Address": supplier_address,
+        "Emergency Phone": emergency_phone,
     }
 
-    # Section 3: Hazards Identification
+    # Section 2 – Composition and Information on Ingredients (dynamic; pure substance)
+    composition_synonyms = safety_data.get("composition", {}).get("Synonyms", [])
+    if not composition_synonyms:
+        composition_synonyms = synonyms_full[:10]
+    sds["Section2"]["data"] = {
+        "Substance Name": pubchem.get("name", "Unknown"),
+        "CAS Number": pubchem.get("cas", "Not available"),
+        "EC / PubChem CID": pubchem.get("cid", "Not available"),
+        "Molecular Formula": pubchem.get("formula", "Not available"),
+        "Molecular Weight": f"{pubchem.get('mw'):.2f} g/mol" if pubchem.get("mw") else "Not available",
+        "Synonyms": ", ".join(composition_synonyms) if composition_synonyms else "Not available",
+        "Hazardous Components": "None (single substance)",
+        "Concentration": "100%",
+        "LogP": pubchem.get("logp", "Not available"),
+        "Hydrogen Bond Donor Count": pubchem.get("h_bond_donor", "Not available"),
+        "Hydrogen Bond Acceptor Count": pubchem.get("h_bond_acceptor", "Not available"),
+    }
+
+    # Section 3: Hazards Identification (merge dynamic extraction with heuristic fallbacks)
+    dynamic_hazards = safety_data.get("hazards_identification", {}) or {}
+    # Heuristic predictions only used where dynamic data missing
     is_flammable = pubchem.get("logp", 0) > 1.5
-    is_toxic = protx.get("toxicity_class") in ["Class I", "II", "III", "IV"]
-
-    pictograms = []
-    hazard_statements = []
-
+    is_toxic = protx.get("toxicity_class") in ["Class I", "Class II", "Class III", "Class IV"]
+    fallback_signal_word = "Danger" if (is_flammable or is_toxic) else "Warning"
+    fallback_hazard_statements = []
+    fallback_pictograms = []
     if is_flammable:
-        pictograms.append("🔥 Flammable")
-        hazard_statements.append("H225: Highly flammable liquid and vapor")
+        fallback_pictograms.append("Flame")
+        fallback_hazard_statements.append("H225: Highly flammable liquid and vapor")
     if is_toxic:
-        pictograms.append("💀 Acute Toxicity")
-        hazard_statements.append("H301: Toxic if swallowed")
-        hazard_statements.append("H331: Toxic if inhaled")
-
-    signal_word = "Danger" if (is_flammable or is_toxic) else "Warning"
-
-    health_effects = (
-        "This substance is harmful if inhaled, swallowed, or absorbed through the skin. "
-        + ("It may cause central nervous system depression, organ damage, or acute toxicity. " if is_toxic else "")
-        + ("Vapors may cause dizziness or asphyxiation in high concentrations. " if is_flammable else "")
-        + "Chronic exposure may lead to liver, kidney, or respiratory damage."
-    )
-
-    precautionary = [
+        fallback_pictograms.append("Skull and Crossbones")
+        fallback_hazard_statements.extend(["H301: Toxic if swallowed", "H331: Toxic if inhaled"])
+    fallback_precautionary = [
         "P210: Keep away from heat, hot surfaces, sparks, open flames.",
         "P241: Use explosion-proof electrical/ventilation equipment.",
         "P261: Avoid breathing dust/fume/gas/mist/vapors/spray.",
         "P280: Wear protective gloves/protective clothing/eye protection/face protection.",
         "P305+P351+P338: IF IN EYES: Rinse cautiously with water for several minutes."
     ]
-
+    health_effects = (
+        "This substance may be harmful if inhaled, swallowed, or absorbed through the skin. "
+        + ("Possible systemic toxicity. " if is_toxic else "")
+        + ("Vapors may cause dizziness. " if is_flammable else "")
+        + "Chronic exposure effects not fully characterized."
+    )
     sds["Section3"]["data"] = {
-        "Signal Word": signal_word,
-        "GHS Pictograms": ", ".join(pictograms) if pictograms else "Not classified",
-        "Hazard Statements": hazard_statements if hazard_statements else ["No significant hazards identified"],
-        "Precautionary Statements": precautionary,
-        "Physical Hazards": "Flammable liquid and vapor" if is_flammable else "Not flammable",
-        "Health Hazards": ", ".join([p.replace("💀 ", "") for p in pictograms if "💀" in p]) or "None identified",
+        "Signal Word": dynamic_hazards.get("Signal Word") if dynamic_hazards.get("Signal Word") not in [None, "Not available"] else fallback_signal_word,
+        "GHS Pictograms": ", ".join(dynamic_hazards.get("GHS Pictograms", []) or fallback_pictograms) or "Not classified",
+        "Hazard Statements": dynamic_hazards.get("Hazard Statements") or (fallback_hazard_statements or ["No significant hazards identified"]),
+        "Precautionary Statements": fallback_precautionary,  # Could be enhanced dynamically later
+        "Physical Hazards": "Flammable" if is_flammable else "Not classified",
+        "Health Hazards": "Acute Toxicity" if is_toxic else "None identified",
         "Environmental Hazards": "Toxic to aquatic life" if protx.get("toxicity_class") in ["Class I", "Class II"] else "Low concern",
         "Routes of Exposure": "Inhalation, Skin Contact, Ingestion, Eye Contact",
         "Acute and Chronic Effects": health_effects,
-        "Immediate Medical Attention": "Seek medical attention immediately in case of exposure. Show SDS to physician."
+        "Immediate Medical Attention": "Seek medical attention in case of exposure. Show SDS to physician."
     }
 
-    # Section 4
-    sds["Section4"]["data"] = {
-        "Inhalation": "Move to fresh air. If breathing is difficult, give oxygen.",
-        "Skin Contact": "Flush with plenty of water. Remove contaminated clothing.",
-        "Eye Contact": "Flush with water for at least 15 minutes.",
-        "Ingestion": "Do NOT induce vomiting. Rinse mouth and consult a physician."
-    }
+    # Helper to merge dynamic values with defaults
+    def merged(dynamic_block: dict, defaults: dict):
+        result = {}
+        dynamic_block = dynamic_block or {}
+        for k, v in defaults.items():
+            dv = dynamic_block.get(k)
+            # Treat empty / placeholder as missing
+            if not dv or dv in ["Not available", "Not Available", "N/A", None, ""]:
+                result[k] = v
+            else:
+                result[k] = dv
+        # Include any extra dynamic keys not in defaults
+        for k, v in dynamic_block.items():
+            if k not in result and v:
+                result[k] = v
+        return result
 
-    # Section 5
-    flash_point = "13°C" if pubchem.get("logp", 0) > 1 else "Not flammable"
-    sds["Section5"]["data"] = {
-        "Flash Point": flash_point,
-        "Flammable Limits": "3.3% - 19% in air",
+    # Section 4 – First Aid Measures (dynamic from PubChem first_aid)
+    sds["Section4"]["data"] = merged(
+        safety_data.get("first_aid"),
+        {
+            "Inhalation": "Move to fresh air. If breathing is difficult, give oxygen.",
+            "Skin Contact": "Flush with plenty of water. Remove contaminated clothing.",
+            "Eye Contact": "Flush with water for at least 15 minutes.",
+            "Ingestion": "Do NOT induce vomiting. Rinse mouth and consult a physician."
+        }
+    )
+
+    # Section 5 – Fire Fighting (merge dynamic fire_fighting)
+    fire_defaults = {
         "Extinguishing Media": "Dry chemical, CO2, alcohol-resistant foam",
         "Special Hazards": "Vapors may form explosive mixtures with air."
     }
+    fire_dynamic = safety_data.get("fire_fighting")
+    # Derive flash point heuristically still (PubChem endpoint not always structured)
+    flash_point = "13°C" if pubchem.get("logp", 0) > 1 else "Not flammable"
+    fire_block = merged(fire_dynamic, fire_defaults)
+    fire_block = {"Flash Point": flash_point, "Flammable Limits": "3.3% - 19% in air", **fire_block}
+    sds["Section5"]["data"] = fire_block
 
-    # Section 6
-    sds["Section6"]["data"] = {
-        "Personal Precautions": "Wear PPE, ensure ventilation",
-        "Environmental Precautions": "Prevent entry into drains or waterways",
-        "Methods of Containment": "Absorb with inert material (sand, vermiculite)"
-    }
+    # Section 6 – Accidental Release
+    sds["Section6"]["data"] = merged(
+        safety_data.get("accidental_release"),
+        {
+            "Personal Precautions": "Wear PPE, ensure ventilation",
+            "Environmental Precautions": "Prevent entry into drains or waterways",
+            "Methods of Containment": "Absorb with inert material (sand, vermiculite)"
+        }
+    )
 
-    # Section 7
-    sds["Section7"]["data"] = {
-        "Handling": "Ground containers, use explosion-proof equipment",
-        "Storage": "Store in a cool, well-ventilated place away from ignition sources"
-    }
+    # Section 7 – Handling & Storage
+    sds["Section7"]["data"] = merged(
+        safety_data.get("handling_storage"),
+        {
+            "Handling": "Ground containers, use explosion-proof equipment",
+            "Storage": "Store in a cool, well-ventilated place away from ignition sources"
+        }
+    )
 
-    # Section 8
-    sds["Section8"]["data"] = {
-        "TLV-TWA": "100 ppm (300 mg/m³) for ethanol-like compounds",
-        "Engineering Controls": "Local exhaust ventilation",
-        "Personal Protection": "Safety goggles, gloves, lab coat"
-    }
+    # Section 8 – Exposure Controls
+    sds["Section8"]["data"] = merged(
+        safety_data.get("exposure_controls"),
+        {
+            "TLV-TWA": "100 ppm (300 mg/m³) for ethanol-like compounds",
+            "Engineering Controls": "Local exhaust ventilation",
+            "Personal Protection": "Safety goggles, gloves, lab coat"
+        }
+    )
 
-    # Section 9
+    # Section 9 – Physical & Chemical Properties (merge dynamic physical properties)
     mw_numeric = props["_MolecularWeight_numeric"]
-    # Section 9
-    sds["Section9"]["data"] = {
+    dynamic_phys = safety_data.get("physical_properties", {}) or {}
+    s9_defaults = {
         "Physical State": "Liquid" if mw_numeric < 300 else "Solid",
         "Color": "Colorless",
         "Odor": "Characteristic",
@@ -606,55 +726,78 @@ def generate_sds(smiles):
         "Solubility in Water": pubchem.get("solubility", "Data not available"),
         "Density": "Approx. 0.79 g/cm³ (for alcohols)",
         "Vapor Pressure": "< 1 mmHg at 25°C",
-        **{k: v for k, v in props.items() if not k.startswith("_")}
     }
+    # Overlay dynamic values where available (non-empty)
+    for dk, dv in dynamic_phys.items():
+        if dv and dv not in ["Not available", "N/A"]:
+            s9_defaults[dk] = dv
+    # Add computed molecular properties
+    s9_defaults.update({k: v for k, v in props.items() if not k.startswith("_")})
+    sds["Section9"]["data"] = s9_defaults
 
-    # Section 10
-    sds["Section10"]["data"] = {
-        "Stability": "Stable under normal conditions",
-        "Conditions to Avoid": "Heat, flames, sparks",
-        "Incompatible Materials": "Strong oxidizing agents",
-        "Hazardous Decomposition": "Carbon monoxide, carbon dioxide"
-    }
+    # Section 10 – Stability / Reactivity
+    sds["Section10"]["data"] = merged(
+        safety_data.get("stability_reactivity"),
+        {
+            "Stability": "Stable under normal conditions",
+            "Conditions to Avoid": "Heat, flames, sparks",
+            "Incompatible Materials": "Strong oxidizing agents",
+            "Hazardous Decomposition": "Carbon monoxide, carbon dioxide"
+        }
+    )
 
-    # Section 11
+    # Section 11 – Toxicological Information (merge dynamic toxicological)
+    dynamic_tox = safety_data.get("toxicological", {}) or {}
+    ld50_entries = dynamic_tox.get("LD50 Entries") or []
+    lc50_entries = dynamic_tox.get("LC50 Entries") or []
     sds["Section11"]["data"] = {
-    "LD50 Oral Rat": protx.get("ld50"),
-    "LC50 Inhalation Rat": protx.get("lc50_inhalation_rat"),
-    "Carcinogenicity": "Suspected" if "Hepatotoxicity" in protx.get("hazard_endpoints", []) else "Not suspected",
-    "Mutagenicity": "Positive" if "Hepatotoxicity" in protx.get("hazard_endpoints", []) else "Negative",
-    "Toxicity Class": protx.get("toxicity_class", "Class IV")
+        "LD50 Oral Rat": ld50_entries[0] if ld50_entries else protx.get("ld50"),
+        "LC50 Inhalation Rat": lc50_entries[0] if lc50_entries else protx.get("lc50_inhalation_rat"),
+        "Additional LD50 Entries": ld50_entries[1:] if len(ld50_entries) > 1 else [],
+        "Carcinogenicity": dynamic_tox.get("Carcinogenicity") if dynamic_tox.get("Carcinogenicity") not in [None, "Not available"] else ("Suspected" if "Hepatotoxicity" in protx.get("hazard_endpoints", []) else "Not suspected"),
+        "Mutagenicity": dynamic_tox.get("Mutagenicity") if dynamic_tox.get("Mutagenicity") not in [None, "Not available"] else ("Positive" if "Hepatotoxicity" in protx.get("hazard_endpoints", []) else "Negative"),
+        "Toxicity Class": protx.get("toxicity_class", "Class IV")
     }
 
-    # Section 12
+    # Section 12 – Ecological Information (merge dynamic ecological)
+    dynamic_eco = safety_data.get("ecological", {}) or {}
     sds["Section12"]["data"] = {
-        "Ecotoxicity": "Toxic to aquatic life" if protx.get("toxicity_class") in ["Class I", "Class II"] else "Low concern",
-        "Biodegradability": "Yes",
-        "Persistence": "Low",
-        "Bioaccumulation": "Low potential"
+        "Ecotoxicity": dynamic_eco.get("Ecotoxicity") if dynamic_eco.get("Ecotoxicity") not in [None, "Not available"] else ("Toxic to aquatic life" if protx.get("toxicity_class") in ["Class I", "Class II"] else "Low concern"),
+        "Biodegradability": "Yes",  # placeholder; could be parsed in future
+        "Persistence": dynamic_eco.get("Persistence") if dynamic_eco.get("Persistence") not in [None, "Not available"] else "Low",
+        "Bioaccumulation": dynamic_eco.get("Bioaccumulation") if dynamic_eco.get("Bioaccumulation") not in [None, "Not available"] else "Low potential"
     }
 
-    # Section 13
-    sds["Section13"]["data"] = {
-        "Disposal Method": "Dispose in accordance with local regulations",
-        "Contaminated Packaging": "Rinse and recycle or dispose properly"
-    }
+    # Section 13 – Disposal
+    sds["Section13"]["data"] = merged(
+        safety_data.get("disposal"),
+        {
+            "Disposal Method": "Dispose in accordance with local regulations",
+            "Contaminated Packaging": "Rinse and recycle or dispose properly"
+        }
+    )
 
-    # Section 14
-    sds["Section14"]["data"] = {
-        "UN Number": "UN1170",
-        "Proper Shipping Name": "Ethanol or Ethyl Alcohol",
-        "Transport Hazard Class": "3 (Flammable Liquid)",
-        "Packing Group": "II"
-    }
+    # Section 14 – Transport
+    sds["Section14"]["data"] = merged(
+        safety_data.get("transport"),
+        {
+            "UN Number": "UN1170",
+            "Proper Shipping Name": "Ethanol or Ethyl Alcohol",
+            "Transport Hazard Class": "3 (Flammable Liquid)",
+            "Packing Group": "II"
+        }
+    )
 
-    # Section 15
-    sds["Section15"]["data"] = {
-        "TSCA": "Listed",
-        "DSL": "Listed",
-        "WHMIS": "Classified",
-        "GHS Regulation": "GHS Rev 9 compliant"
-    }
+    # Section 15 – Regulatory
+    sds["Section15"]["data"] = merged(
+        safety_data.get("regulatory"),
+        {
+            "TSCA": "Listed",
+            "DSL": "Listed",
+            "WHMIS": "Classified",
+            "GHS Regulation": "GHS Rev 9 compliant"
+        }
+    )
 
     # Section 16
     sds["Section16"]["data"] = {

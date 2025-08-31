@@ -8,3 +8,8 @@ gunicorn
 Flask-Cors
 numpy
 python-docx
+# Added explicit packages required by code
+reportlab
+Pillow
+requests
+beautifulsoup4
