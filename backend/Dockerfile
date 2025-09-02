@@ -26,5 +26,5 @@ COPY . .
 # Expose port (Render uses PORT environment variable automatically)
 EXPOSE 10000
 
-# Run the app with gunicorn
-CMD ["gunicorn", "main:app", "--bind", "0.0.0.0:$PORT"]
+# Run the app with gunicorn – use shell form to allow $PORT expansion
+CMD exec gunicorn "main:app" "--bind=0.0.0.0:${PORT:-10000}" "--workers=2"
