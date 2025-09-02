@@ -368,8 +368,8 @@ if __name__ == '__main__':
     
     # Run Flask app
     app.run(
-        host='127.0.0.1', 
-        port=5000, 
-        debug=True,
-        threaded=True  # Handle multiple requests
+    host='0.0.0.0', 
+    port=int(os.getenv("PORT", 5000)), 
+    debug=False,  # Never enable debug in production
+    threaded=True
     )
