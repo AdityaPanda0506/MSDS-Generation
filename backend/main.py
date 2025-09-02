@@ -28,7 +28,10 @@ logger = logging.getLogger(__name__)
 
 # Initialize Flask app
 app = Flask(__name__)
-CORS(app, origins=["http://localhost:3000"])  # Restrict CORS to React frontend
+CORS(app, origins=[
+    "http://localhost:3000",
+    "https://msds-frontend.vercel.app"
+]) # Restrict CORS to React frontend
 
 # Initialize SDS Generator
 sds_generator = SDSGenerator()
