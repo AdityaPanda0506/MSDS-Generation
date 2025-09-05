@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app, origins=[
     "http://localhost:3000",
-    "https://medxai-sds-generator.vercel.app/"
+    "https://medxai-sds-generator.vercel.app"
 ]) # Restrict CORS to React frontend
 
 # Initialize SDS Generator
