@@ -26,10 +26,11 @@ WORKDIR /app
 # Copy requirements first
 COPY requirements.txt .
 
-# 🚨 CRITICAL: Upgrade pip, setuptools, and wheel BEFORE installing dependencies
+# 🚨 CRITICAL: UPGRADE pip, setuptools, wheel BEFORE installing anything else
+# This fixes the "AttributeError: module 'pkgutil' has no attribute 'ImpImporter'" error
 RUN pip install --upgrade pip setuptools wheel
 
-# Now install your requirements safely
+# Now install your Python dependencies safely
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy your application code
