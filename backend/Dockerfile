@@ -1,50 +1,24 @@
-# Use a pre-built image that includes RDKit
-FROM continuumio/miniconda3:latest
-
-# Install system dependencies
-RUN apt-get update && \
-    apt-get install -y \
-        gcc \
-        g++ \
-        curl \
-        ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install RDKit via conda (should work better in conda base image)
-RUN conda install -c conda-forge rdkit -y && \
-    conda clean --all -y
+# Use base image with conda
+FROM continuumio/anaconda3
 
 # Set working directory
 WORKDIR /app
 
-# Copy requirements (without RDKit since we installed it via conda)
+# Copy requirements first
 COPY requirements.txt .
 
-# Install remaining Python dependencies via pip
+# Install rdkit via conda-forge (critical!)
+RUN conda install -c conda-forge rdkit -y && \
+    conda clean -a -y
+
+# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# Copy your code
 COPY . .
 
-# Create directories
-RUN mkdir -p temp logs
-
-# Set environment variables
-ENV PYTHONPATH=/app
-ENV FLASK_ENV=production
-
 # Expose port
-EXPOSE $PORT
+EXPOSE 10000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=30s --start-period=15s --retries=3 \
-    CMD curl -f http://localhost:$PORT/api/health || exit 1
-
-# Run with gunicorn
-CMD gunicorn main:app \
-    --bind 0.0.0.0:$PORT \
-    --workers 1 \
-    --timeout 300 \
-    --keep-alive 5 \
-    --access-logfile - \
-    --error-logfile -
+# Run the app
+CMD exec gunicorn "main:app" "--bind=0.0.0.0:${PORT:-10000}" "--workers=2" "--timeout", "120"
