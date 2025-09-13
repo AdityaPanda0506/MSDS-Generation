@@ -1,15 +1,52 @@
-fastapi
-uvicorn
-pdfkit
-pubchempy
-pandas
-Flask
-gunicorn
-Flask-Cors
-numpy
-python-docx
-rdkit
-requests
-beautifulsoup4
-python-dotenv
-mistralai
+# Web framework
+Flask==2.3.3
+Flask-Cors==4.0.0
+gunicorn==21.2.0
+
+# HTTP requests and web scraping
+requests==2.31.0
+beautifulsoup4==4.12.2
+urllib3==2.0.7
+
+# Data processing
+pandas==2.0.3
+numpy==1.24.3
+
+# Chemistry-specific
+pubchempy==1.0.4
+# rdkit-pypi==2022.9.5  # Commented out since we install via conda
+
+# Document processing
+python-docx==0.8.11
+openpyxl==3.1.2
+
+# PDF generation
+pdfkit==1.0.0
+
+# AI/ML
+mistralai==0.4.0
+
+# Environment variables
+python-dotenv==1.0.0
+
+# Date/time handling
+python-dateutil==2.8.2
+
+# XML parsing
+lxml==4.9.3
+
+# Additional utilities
+certifi==2023.7.22
+charset-normalizer==3.3.0
+idna==3.4
+MarkupSafe==2.1.3
+Werkzeug==2.3.7
+click==8.1.7
+itsdangerous==2.1.2
+Jinja2==3.1.2
+
+# For better JSON handling
+ujson==5.8.0
+
+# Caching (optional but recommended for production)
+redis==5.0.0
