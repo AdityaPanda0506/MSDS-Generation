@@ -1850,7 +1850,7 @@ class SDSDataFetcher:
                 
         try:
             transport_data = self.generate_transport_classification_with_llm({
-                "basic_data": transport_data,
+                "basic_data": basic_data,
                 "structural_analysis": {"hazards": structural_hazards},
                 "physical_properties": data.get("physical_properties", {})
             })
@@ -2187,4 +2187,5 @@ def predict_compound_toxicity(smiles):
     """
     fetcher = SDSDataFetcher()
     return fetcher.predict_toxicity_protx(smiles)
+
 
