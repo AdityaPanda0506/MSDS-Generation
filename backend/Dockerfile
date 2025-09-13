@@ -1,43 +1,70 @@
-# Use a base image with conda and Linux tools
-FROM continuumio/anaconda3
+# Use Python 3.9 slim image for better compatibility
+FROM python:3.9-slim
 
-# Install rdkit via conda-forge
+# Install system dependencies
+RUN apt-get update && \
+    apt-get install -y \
+        wkhtmltopdf \
+        gcc \
+        g++ \
+        libxml2-dev \
+        libxslt1-dev \
+        zlib1g-dev \
+        libjpeg-dev \
+        libpng-dev \
+        wget \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install conda (minimal)
+RUN wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/miniconda.sh && \
+    bash /tmp/miniconda.sh -b -p /opt/conda && \
+    rm /tmp/miniconda.sh && \
+    /opt/conda/bin/conda clean -a -y
+
+# Add conda to PATH
+ENV PATH="/opt/conda/bin:$PATH"
+
+# Install RDKit via conda
 RUN conda install -c conda-forge rdkit -y && \
     conda clean -a -y
-
-# Install system dependencies: wkhtmltopdf + dependencies
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        wkhtmltopdf \
-        libxrender1 \
-        libfontconfig1 \
-        libx11-dev \
-        libxext6 \
-        libxft2 \
-        libfreetype6 \
-        libpng16-16 \
-        zlib1g \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
 WORKDIR /app
 
-# Copy Python requirements
+# Copy requirements first for better caching
 COPY requirements.txt .
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy your application code
+# Copy application code
 COPY . .
 
-# Ensure wkhtmltopdf is executable and accessible
-# (Sometimes it's installed as /usr/bin/wkhtmltopdf, sometimes /usr/local/bin/)
-RUN ln -sf /usr/bin/wkhtmltopdf /usr/local/bin/wkhtmltopdf || true
+# Create necessary directories
+RUN mkdir -p temp logs
 
-# Expose port (Render uses PORT environment variable automatically)
-EXPOSE 10000
+# Set environment variables
+ENV PYTHONPATH=/app
+ENV FLASK_APP=main.py
+ENV FLASK_ENV=production
 
-# Run the app with gunicorn
-CMD ["gunicorn", "main:app", "--bind", "0.0.0.0:$PORT", "--timeout", "120"]
+# Expose port
+EXPOSE $PORT
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:$PORT/api/health || exit 1
+
+# Use gunicorn with proper configuration
+CMD gunicorn main:app \
+    --bind 0.0.0.0:$PORT \
+    --workers 2 \
+    --worker-class sync \
+    --worker-connections 1000 \
+    --timeout 300 \
+    --keep-alive 5 \
+    --max-requests 1000 \
+    --max-requests-jitter 50 \
+    --access-logfile - \
+    --error-logfile -
