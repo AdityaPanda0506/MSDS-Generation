@@ -1,36 +1,26 @@
-# Use Python 3.9 slim image
-FROM python:3.9-slim
+# Use a pre-built image that includes RDKit
+FROM continuumio/miniconda3:latest
 
-# Install minimal system dependencies
+# Install system dependencies
 RUN apt-get update && \
     apt-get install -y \
         gcc \
         g++ \
-        wget \
         curl \
         ca-certificates \
-        libxml2-dev \
-        libxslt1-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install miniconda
-RUN wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/miniconda.sh && \
-    bash /tmp/miniconda.sh -b -p /opt/conda && \
-    rm /tmp/miniconda.sh && \
-    /opt/conda/bin/conda clean -a -y
-
-# Add conda to PATH
-ENV PATH="/opt/conda/bin:$PATH"
-
-# Install RDKit via conda (this is the critical part)
+# Install RDKit via conda (should work better in conda base image)
 RUN conda install -c conda-forge rdkit -y && \
-    conda clean -a -y
+    conda clean --all -y
 
 # Set working directory
 WORKDIR /app
 
-# Copy requirements and install Python packages
+# Copy requirements (without RDKit since we installed it via conda)
 COPY requirements.txt .
+
+# Install remaining Python dependencies via pip
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
@@ -46,8 +36,8 @@ ENV FLASK_ENV=production
 # Expose port
 EXPOSE $PORT
 
-# Simple health check
-HEALTHCHECK --interval=30s --timeout=30s --start-period=10s --retries=3 \
+# Health check
+HEALTHCHECK --interval=30s --timeout=30s --start-period=15s --retries=3 \
     CMD curl -f http://localhost:$PORT/api/health || exit 1
 
 # Run with gunicorn
