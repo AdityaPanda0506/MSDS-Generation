@@ -18,6 +18,12 @@ from io import BytesIO
 from docx import Document
 from docx.shared import Inches, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+import os
+# from mistralai.client import MistralClient
+# from mistralai.models.chat_completion import ChatMessage
+from mistralai import Mistral
+from dotenv import load_dotenv
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -35,6 +41,680 @@ class SDSDataFetcher:
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
+        # Initialize Mistral client
+        self.mistral_client = None
+        self.setup_mistral_client()
+    
+    def setup_mistral_client(self):
+        """Initialize Mistral AI client if API key is available"""
+        try:
+            api_key = os.getenv('MISTRAL_API_KEY')
+            if api_key:
+                self.mistral_client = Mistral(api_key=api_key)
+                logger.info("[Mistral] Client initialized successfully")
+            else:
+                logger.warning("[Mistral] API key not found in environment variables")
+        except Exception as e:
+            logger.error(f"[Mistral] Failed to initialize client: {e}")
+            self.mistral_client = None
+
+    def generate_missing_data_with_llm(self, compound_data, missing_fields):
+        """Use Mistral LLM to generate missing SDS data with improved cleaning"""
+        if not self.mistral_client or not missing_fields:
+            return {}
+
+        try:
+            # Prepare context about the compound
+            basic_data = compound_data.get("basic_data", {})
+            compound_name = basic_data.get("name", "Unknown compound")
+            formula = basic_data.get("formula", "Unknown")
+            mw = basic_data.get("mw", "Unknown")
+            
+            # Get available structural and toxicity information
+            structural_info = compound_data.get("structural_analysis", {})
+            toxicity_info = compound_data.get("toxicity_data", {})
+            physical_props = compound_data.get("physical_properties", {})
+            
+            context_prompt = f"""
+    You are an expert chemical safety specialist generating Safety Data Sheet (SDS) entries according to GHS/OSHA/CLP regulations.
+
+    CRITICAL OUTPUT REQUIREMENTS:
+    - Provide ONLY the requested value for each field
+    - NO JSON formatting, brackets, or braces
+    - NO field labels or explanations  
+    - NO markdown formatting, asterisks, or underscores
+    - NO quotation marks around values
+    - Write in standard SDS style (concise, factual, direct)
+    - Use imperative or passive voice
+    - For LD50/LC50: use format "X-Y mg/kg" or "Not established"
+    - For hazard statements: use "H302: Harmful if swallowed" format
+    - For temperatures: use "120-125 °C" format
+    - For instructions: "Move to fresh air. Seek medical attention."
+
+    Compound Information:
+    - Name: {compound_name}
+    - Formula: {formula}
+    - Molecular Weight: {mw} g/mol
+    - Structural Hazards: {len(structural_info.get('hazards', []))} identified
+    - Toxicity Class: {toxicity_info.get('toxicity_class', 'Unknown')}
+
+    For each missing field below, provide ONLY the clean value without formatting:
+    """
+            
+            generated_data = {}
+            
+            # Process missing fields in smaller batches for better results
+            field_batches = [missing_fields[i:i+3] for i in range(0, len(missing_fields), 3)]
+            
+            for batch in field_batches:
+                batch_prompt = context_prompt + "\n"
+                field_mapping = {}  # Track field order
+                
+                for idx, (field_path, field_name) in enumerate(batch):
+                    batch_prompt += f"{idx+1}. {field_name}\n"
+                    field_mapping[idx+1] = field_path
+                
+                batch_prompt += f"\nProvide exactly one clean value per line, numbered 1-{len(batch)}:"
+                
+                try:
+                    messages = [{"role": "user", "content": batch_prompt}]
+                    
+                    response = self.mistral_client.chat.complete(
+                        model="mistral-large-latest",
+                        messages=messages,
+                        temperature=0.1,  # Very low temperature for consistency
+                        max_tokens=1200
+                    )
+                    
+                    response_text = response.choices[0].message.content
+                    
+                    # Parse numbered responses
+                    lines = response_text.split('\n')
+                    for line in lines:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        
+                        # Look for numbered format: "1. value" or "1: value"
+                        match = re.match(r'^(\d+)[\.\:\)]\s*(.+)$', line)
+                        if match:
+                            num = int(match.group(1))
+                            raw_value = match.group(2)
+                            
+                            if num in field_mapping:
+                                # Apply comprehensive cleaning - multiple passes
+                                cleaned_value = self.clean_llm_output(raw_value)
+                                cleaned_value = self.clean_llm_output(cleaned_value)  # Second pass
+                                cleaned_value = self.final_text_polish(cleaned_value)  # Final polish
+                                
+                                if cleaned_value and len(cleaned_value) >= 5:
+                                    field_path = field_mapping[num]
+                                    generated_data[field_path] = cleaned_value
+                    
+                    time.sleep(0.5)  # Rate limiting
+                    
+                except Exception as e:
+                    logger.error(f"[Mistral] Error generating batch: {e}")
+                    continue
+            
+            logger.info(f"[Mistral] Generated {len(generated_data)} cleaned field values")
+            return generated_data
+            
+        except Exception as e:
+            logger.error(f"[Mistral] Error in generate_missing_data_with_llm: {e}")
+            return {}
+
+    def prioritize_missing_fields(self, missing_fields):
+        """Prioritize missing fields by importance for SDS compliance including transport"""
+        # Critical fields that are legally required
+        critical_fields = [
+            'first_aid.Inhalation', 'first_aid.Skin Contact', 'first_aid.Eye Contact', 'first_aid.Ingestion',
+            'fire_fighting.Extinguishing Media', 'handling_storage.Handling', 'handling_storage.Storage',
+            'exposure_controls.Engineering Controls', 'toxicological.Acute Toxicity',
+            'stability_reactivity.Chemical Stability', 'transport.UN Number', 'transport.Transport Hazard Class'
+        ]
+        
+        # Important fields for safety and compliance
+        important_fields = [
+            'hazard_identification.Signal Word', 'hazard_identification.Hazard Statements',
+            'physical_properties.Flash Point', 'disposal.Disposal Method',
+            'transport.UN Proper Shipping Name', 'transport.Packing Group',
+            'ecological.Ecotoxicity', 'accidental_release.Personal Precautions'
+        ]
+        
+        # Secondary fields
+        secondary_fields = [
+            'transport.Environmental Hazards', 'transport.Marine Pollutant', 'transport.Special Precautions',
+            'regulatory.GHS Classification', 'exposure_controls.TLV-TWA'
+        ]
+        
+        prioritized = []
+        
+        # Add critical fields first
+        for field_path, field_name in missing_fields:
+            if field_path in critical_fields:
+                prioritized.append((field_path, field_name))
+        
+        # Add important fields
+        for field_path, field_name in missing_fields:
+            if field_path in important_fields and (field_path, field_name) not in prioritized:
+                prioritized.append((field_path, field_name))
+        
+        # Add secondary fields
+        for field_path, field_name in missing_fields:
+            if field_path in secondary_fields and (field_path, field_name) not in prioritized:
+                prioritized.append((field_path, field_name))
+        
+        # Add remaining fields
+        for field_path, field_name in missing_fields:
+            if (field_path, field_name) not in prioritized:
+                prioritized.append((field_path, field_name))
+        
+        # Limit to most important fields to avoid overwhelming the LLM
+        return prioritized[:20]  # Process max 20 fields per compound
+        
+    def clean_llm_output(self, raw_text):
+        """Enhanced cleaning and normalization of raw LLM output to match SDS style."""
+        if not raw_text:
+            return ""
+
+        # Remove common LLM artifacts and formatting
+        cleaned = raw_text.strip()
+        
+        # Remove JSON-like formatting characters
+        cleaned = re.sub(r'^[\{\[\"\'\`]*', '', cleaned)  # Remove leading braces, brackets, quotes
+        cleaned = re.sub(r'[\}\]\"\'\`]*$', '', cleaned)  # Remove trailing braces, brackets, quotes
+        
+        # Remove markdown formatting - Enhanced patterns
+        cleaned = re.sub(r'^\*+\s*', '', cleaned)  # Remove leading asterisks
+        cleaned = re.sub(r'\s*\*+$', '', cleaned)  # Remove trailing asterisks
+        cleaned = re.sub(r'^#+\s*', '', cleaned)   # Remove markdown headers
+        cleaned = re.sub(r'\*\*(.*?)\*\*', r'\1', cleaned)  # Remove bold markdown **text**
+        cleaned = re.sub(r'\*(.*?)\*', r'\1', cleaned)      # Remove italic markdown *text*
+        cleaned = re.sub(r'`(.*?)`', r'\1', cleaned)        # Remove code blocks `text`
+        cleaned = re.sub(r'_{1,2}(.*?)_{1,2}', r'\1', cleaned)  # Remove underline _text_ or __text__
+        
+        # Remove bullet points and numbering
+        cleaned = re.sub(r'^[\*\-\d\.\)\s]+', '', cleaned)
+        cleaned = re.sub(r'^\s*[•·▪▫]\s*', '', cleaned)
+        
+        # Remove common LLM attribution suffixes - Enhanced
+        attribution_patterns = [
+            r'\s*\(LLM-generated\)$',
+            r'\s*\(AI-generated\)$', 
+            r'\s*\(Generated\)$',
+            r'\s*\(Predicted\)$',
+            r'\s*\(Estimated\)$',
+            r'\s*\(Machine learning prediction\)$',
+            r'\s*\(Model prediction\)$',
+            r'\s*\(Computational prediction\)$'
+        ]
+        
+        for pattern in attribution_patterns:
+            cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+        
+        # Remove common prefixes and suffixes that LLMs add
+        prefixes_to_remove = [
+            r'^(?:Answer|Response|Result|Output|Value|Text|Content):\s*',
+            r'^(?:The|A|An)\s+(?:answer|response|result|value|text)\s+is:\s*',
+            r'^(?:Based on|According to|As per|Per).*?[:,]\s*',
+            r'^(?:Here is|Here\'s|This is|The following is).*?[:,]\s*',
+            r'^(?:In this case|For this compound|For this substance).*?[:,]\s*'
+        ]
+        
+        for prefix in prefixes_to_remove:
+            cleaned = re.sub(prefix, '', cleaned, flags=re.IGNORECASE)
+        
+        # Remove explanatory suffixes
+        suffixes_to_remove = [
+            r'\s*\((?:estimated|predicted|based on.*?|according to.*?|LLM.*?|AI.*?|generated)\)$',
+            r'\s*\[(?:estimated|predicted|based on.*?|according to.*?|LLM.*?|AI.*?|generated)\]$',
+            r'\s*—.*?(?:estimated|predicted|based on).*?$',
+            r'\s*–.*?(?:estimated|predicted|based on).*?$',
+            r'\s*\(see.*?\)$',
+            r'\s*\[see.*?\]$'
+        ]
+        
+        for suffix in suffixes_to_remove:
+            cleaned = re.sub(suffix, '', cleaned, flags=re.IGNORECASE)
+        
+        # Clean up field labels that might be included
+        field_labels = [
+            r'^(?:Field|Property|Parameter|Attribute|Item|Entry):\s*',
+            r'^\w+\s*:\s*',  # Remove any "word:" pattern at the start
+        ]
+        
+        for label in field_labels:
+            if re.match(label, cleaned):
+                cleaned = re.sub(label, '', cleaned)
+                break
+        
+        # Remove newline characters and normalize whitespace
+        cleaned = re.sub(r'\n+', ' ', cleaned)  # Replace newlines with spaces
+        cleaned = re.sub(r'\r+', ' ', cleaned)  # Replace carriage returns
+        cleaned = re.sub(r'\t+', ' ', cleaned)  # Replace tabs with spaces
+        cleaned = re.sub(r'\s+', ' ', cleaned)  # Collapse multiple spaces
+        
+        # Remove escape sequences
+        cleaned = re.sub(r'\\n', ' ', cleaned)
+        cleaned = re.sub(r'\\r', ' ', cleaned)
+        cleaned = re.sub(r'\\t', ' ', cleaned)
+        cleaned = re.sub(r'\\"', '"', cleaned)
+        cleaned = re.sub(r"\\'", "'", cleaned)
+        
+        # Standardize common SDS terms and formats
+        sds_standardizations = [
+            # Temperature formats
+            (r'(\d+\.?\d*)\s*degrees?\s*celsius', r'\1 °C'),
+            (r'(\d+\.?\d*)\s*°[cC](?:elsius)?', r'\1 °C'),
+            (r'(\d+\.?\d*)\s*deg\s*[cC]', r'\1 °C'),
+            
+            # Pressure formats
+            (r'(\d+\.?\d*)\s*mm\s*hg', r'\1 mmHg'),
+            (r'(\d+\.?\d*)\s*torr', r'\1 Torr'),
+            (r'(\d+\.?\d*)\s*pa(?:scal)?', r'\1 Pa'),
+            
+            # Concentration formats
+            (r'(\d+\.?\d*)\s*mg/kg', r'\1 mg/kg'),
+            (r'(\d+\.?\d*)\s*mg/m3', r'\1 mg/m³'),
+            (r'(\d+\.?\d*)\s*mg/m\^3', r'\1 mg/m³'),
+            
+            # Common "not available" variants
+            (r'(?:not?\s+available|n/?a|unknown|unavailable|no\s+data)', 'Not available'),
+        ]
+        
+        for pattern, replacement in sds_standardizations:
+            cleaned = re.sub(pattern, replacement, cleaned, flags=re.IGNORECASE)
+        
+        # Final cleanup
+        cleaned = cleaned.strip()
+        cleaned = cleaned.strip('.,;:!?-_=+|\\/')
+        cleaned = cleaned.strip()
+        
+        # Final validation - reject if too short or contains obvious artifacts
+        if len(cleaned) < 3:
+            return ""
+        
+        # Reject responses that are clearly invalid
+        invalid_indicators = [
+            'error', 'invalid', 'loading', 'please wait', '404', 'access denied',
+            'undefined', 'null', 'none', 'empty', 'blank', 'missing',
+            '{{', '}}', '[object', 'function(', 'return ', 'console.log'
+        ]
+        
+        cleaned_lower = cleaned.lower()
+        if any(indicator in cleaned_lower for indicator in invalid_indicators):
+            return ""
+        
+        # Truncate if too long
+        if len(cleaned) > 500:
+            cleaned = cleaned[:497] + "..."
+        
+        return cleaned
+    
+    def find_missing_fields(self, data):
+        """Find all fields with 'Not available' values"""
+        missing_fields = []
+        
+        def traverse_dict(d, path=""):
+            for key, value in d.items():
+                current_path = f"{path}.{key}" if path else key
+                if isinstance(value, dict):
+                    traverse_dict(value, current_path)
+                elif value == "Not available" or value == "":
+                    missing_fields.append((current_path, key))
+        
+        traverse_dict(data)
+        return missing_fields
+
+    def apply_generated_data(self, original_data, generated_data):
+        """Apply LLM-generated data with enhanced validation and cleaning"""
+        applied_count = 0
+        
+        for field_path, generated_value in generated_data.items():
+            if not generated_value:
+                continue
+                
+            # Triple-clean the generated value
+            # First pass - basic cleaning
+            cleaned_once = self.clean_llm_output(generated_value)
+            
+            # Second pass - additional cleaning for stubborn artifacts
+            cleaned_twice = self.clean_llm_output(cleaned_once)
+            
+            # Third pass - final polish
+            final_cleaned_value = self.final_text_polish(cleaned_twice)
+            
+            if not final_cleaned_value or len(final_cleaned_value.strip()) < 5:
+                continue
+                
+            # Navigate to the correct nested location
+            path_parts = field_path.split('.')
+            current_dict = original_data
+            
+            try:
+                # Navigate to parent dictionary
+                for part in path_parts[:-1]:
+                    if part in current_dict and isinstance(current_dict[part], dict):
+                        current_dict = current_dict[part]
+                    else:
+                        break
+                else:
+                    # Set the value if path is valid and current value is "Not available"
+                    final_key = path_parts[-1]
+                    if (final_key in current_dict and 
+                        current_dict[final_key] == "Not available"):
+                        
+                        # Final check - ensure it doesn't look like JSON or markdown
+                        if not any(char in final_cleaned_value for char in ['{', '}', '[', ']', '*', '#', '`', '_']):
+                            # Apply clean value WITHOUT attribution
+                            current_dict[final_key] = final_cleaned_value
+                            applied_count += 1
+                            logger.debug(f"[Mistral] Applied cleaned value to {field_path}")
+                        else:
+                            logger.warning(f"[Mistral] Rejected value with formatting artifacts: {final_cleaned_value[:50]}...")
+                            
+            except Exception as e:
+                logger.error(f"[Mistral] Error applying data for {field_path}: {e}")
+        
+        return applied_count
+
+    def final_text_polish(self, text):
+        """Final polishing pass to ensure clean SDS-style text"""
+        if not text:
+            return ""
+        
+        # Remove any remaining formatting characters
+        text = re.sub(r'[\*_`~\^]', '', text)  # Remove markdown remnants
+        text = re.sub(r'\\[nrtbf]', ' ', text)  # Remove escape sequences
+        text = re.sub(r'\s*\([Pp]redicted\)\s*$', '', text)  # Remove (predicted) suffix
+        text = re.sub(r'\s*\([Ee]stimated\)\s*$', '', text)  # Remove (estimated) suffix
+        
+        # Ensure proper sentence structure
+        text = text.strip()
+        if text and not text.endswith('.') and len(text) > 10:
+            text += '.'
+        
+        # Capitalize first letter if it's a proper sentence
+        if text and text[0].islower() and ' ' in text:
+            text = text[0].upper() + text[1:]
+        
+        return text
+
+    def enhance_missing_field_coverage(self, comprehensive_data):
+        """Specifically target commonly missing fields with fallback values"""
+        safety_data = comprehensive_data.get("safety_data", {})
+        basic_data = comprehensive_data.get("basic_data", {})
+        
+        # Define fallback values for critical missing fields
+        critical_fallbacks = {
+            "first_aid.Inhalation": "Move to fresh air immediately. If breathing is difficult, give oxygen. Seek medical attention if symptoms persist.",
+            "first_aid.Skin Contact": "Remove contaminated clothing. Wash skin with soap and water for at least 15 minutes. Seek medical attention if irritation persists.",
+            "first_aid.Eye Contact": "Flush eyes with clean water for at least 15 minutes, lifting eyelids occasionally. Seek medical attention.",
+            "first_aid.Ingestion": "Rinse mouth with water. Do not induce vomiting unless directed by medical personnel. Seek medical attention immediately.",
+            
+            "fire_fighting.Extinguishing Media": "Water spray, foam, dry chemical, or carbon dioxide.",
+            "fire_fighting.Special Hazards": "May emit toxic fumes when heated or burned.",
+            
+            "handling_storage.Handling": "Use appropriate personal protective equipment. Avoid contact with skin and eyes. Use in well-ventilated area.",
+            "handling_storage.Storage": "Store in tightly closed container in cool, dry place away from incompatible materials.",
+            
+            "exposure_controls.Engineering Controls": "Use local exhaust ventilation or general dilution ventilation to maintain exposure below recommended limits.",
+            "exposure_controls.Personal Protection": "Use appropriate personal protective equipment as specified in Section 8.",
+            
+            "stability_reactivity.Chemical Stability": "Stable under normal storage and handling conditions.",
+            "stability_reactivity.Conditions to Avoid": "Heat, flames, ignition sources, and incompatible materials.",
+            
+            "disposal.Disposal Method": "Dispose of in accordance with local, state, and federal regulations. Contact local environmental authorities for guidance.",
+        }
+        
+        applied_fallbacks = 0
+        for field_path, fallback_value in critical_fallbacks.items():
+            path_parts = field_path.split('.')
+            current_dict = safety_data
+            
+            try:
+                for part in path_parts[:-1]:
+                    if part in current_dict:
+                        current_dict = current_dict[part]
+                    else:
+                        break
+                else:
+                    final_key = path_parts[-1]
+                    if (final_key in current_dict and 
+                        current_dict[final_key] == "Not available"):
+                        current_dict[final_key] = fallback_value + " (Default safety recommendation)"
+                        applied_fallbacks += 1
+            except:
+                continue
+        
+        logger.info(f"[Fallback] Applied {applied_fallbacks} default safety recommendations")
+        return comprehensive_data
+    
+    # def prioritize_missing_fields(self, missing_fields):
+    #     """Prioritize missing fields by importance for SDS compliance"""
+    #     # Critical fields that are legally required
+    #     critical_fields = [
+    #         'first_aid.Inhalation', 'first_aid.Skin Contact', 'first_aid.Eye Contact', 'first_aid.Ingestion',
+    #         'fire_fighting.Extinguishing Media', 'handling_storage.Handling', 'handling_storage.Storage',
+    #         'exposure_controls.Engineering Controls', 'toxicological.Acute Toxicity',
+    #         'stability_reactivity.Chemical Stability'
+    #     ]
+        
+    #     # Important fields for safety
+    #     important_fields = [
+    #         'hazard_identification.Signal Word', 'hazard_identification.Hazard Statements',
+    #         'physical_properties.Flash Point', 'disposal.Disposal Method',
+    #         'transport.Transport Hazard Class'
+    #     ]
+        
+    #     prioritized = []
+        
+    #     # Add critical fields first
+    #     for field_path, field_name in missing_fields:
+    #         if field_path in critical_fields:
+    #             prioritized.append((field_path, field_name))
+        
+    #     # Add important fields
+    #     for field_path, field_name in missing_fields:
+    #         if field_path in important_fields and (field_path, field_name) not in prioritized:
+    #             prioritized.append((field_path, field_name))
+        
+    #     # Add remaining fields
+    #     for field_path, field_name in missing_fields:
+    #         if (field_path, field_name) not in prioritized:
+    #             prioritized.append((field_path, field_name))
+        
+    #     return prioritized
+
+
+    def enhance_data_with_llm(self, comprehensive_data):
+        """Updated main method to enhance SDS data with improved LLM processing"""
+        if not self.mistral_client:
+            logger.info("[Mistral] Client not available, skipping LLM enhancement")
+            # Apply fallback values for critical fields
+            return self.enhance_missing_field_coverage(comprehensive_data)
+        
+        # Focus on all sections, not just priority ones
+        safety_data = comprehensive_data.get("safety_data", {})
+        
+        # Find ALL missing fields
+        all_missing = self.find_missing_fields(safety_data)
+        
+        if not all_missing:
+            logger.info("[Mistral] No missing fields found")
+            return comprehensive_data
+        
+        logger.info(f"[Mistral] Found {len(all_missing)} missing fields to enhance")
+        
+        # Generate missing data with enhanced processing
+        generated_data = self.generate_missing_data_with_llm(comprehensive_data, all_missing)
+        
+        if generated_data:
+            # Apply generated data with validation
+            applied_count = self.apply_generated_data(safety_data, generated_data)
+            comprehensive_data["safety_data"] = safety_data
+            
+            # Track LLM usage
+            if "data_sources" not in comprehensive_data:
+                comprehensive_data["data_sources"] = []
+            comprehensive_data["data_sources"].append("Mistral LLM Enhancement")
+            
+            # Add detailed metadata about LLM enhancement
+            comprehensive_data["llm_enhancement"] = {
+                "fields_generated": len(generated_data),
+                "fields_applied": applied_count,
+                "model": "mistral-large-latest",
+                "timestamp": datetime.now().isoformat(),
+                "coverage_improvement": f"{applied_count}/{len(all_missing)} missing fields filled",
+                "note": "LLM-generated fields are marked for expert review"
+            }
+            
+            logger.info(f"[Mistral] Applied {applied_count} generated fields out of {len(generated_data)} generated")
+        else:
+            logger.warning("[Mistral] No data was generated by LLM")
+        
+        # Apply fallback values for any remaining critical missing fields
+        comprehensive_data = self.enhance_missing_field_coverage(comprehensive_data)
+        
+        return comprehensive_data
+
+    def generate_transport_classification_with_llm(self, compound_data):
+        """Generate comprehensive transport classification using LLM"""
+        if not self.mistral_client:
+            return self.generate_basic_transport_classification(compound_data)
+
+        try:
+            basic_data = compound_data.get("basic_data", {})
+            compound_name = basic_data.get("name", "Unknown compound")
+            formula = basic_data.get("formula", "Unknown")
+            hazards = compound_data.get("structural_analysis", {}).get("hazards", [])
+            physical_props = compound_data.get("physical_properties", {})
+            
+            context_prompt = f"""
+    You are a transport safety specialist generating UN transport classification for dangerous goods.
+
+    Compound: {compound_name}
+    Formula: {formula}
+    Hazards: {len(hazards)} structural hazards identified
+    Physical Properties Available: {len(physical_props)} properties
+
+    Generate transport information for each field. Provide ONLY the value for each field (no labels, no JSON, no formatting):
+
+    1. UN Number (4-digit code like UN1234, or "Not regulated")
+    2. UN Proper Shipping Name (official transport name)
+    3. Transport Hazard Class (Class 1-9 or "Not classified")
+    4. Packing Group (I, II, III, or "Not applicable")
+    5. Environmental Hazards (Yes/No with brief reason)
+    6. Marine Pollutant (Yes/No)
+    7. Special Precautions (brief safety instructions)
+
+    Provide exactly one answer per line, numbered 1-7:
+    """
+            
+            messages = [{"role": "user", "content": context_prompt}]
+            
+            response = self.mistral_client.chat.complete(
+                model="mistral-large-latest",
+                messages=messages,
+                temperature=0.1,
+                max_tokens=800
+            )
+            
+            response_text = response.choices[0].message.content
+            transport_data = {}
+            
+            transport_fields = [
+                "UN Number",
+                "UN Proper Shipping Name", 
+                "Transport Hazard Class",
+                "Packing Group",
+                "Environmental Hazards",
+                "Marine Pollutant",
+                "Special Precautions"
+            ]
+            
+            # Parse numbered responses
+            lines = response_text.split('\n')
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Look for numbered format
+                match = re.match(r'^(\d+)[\.\:\)]\s*(.+)$', line)
+                if match:
+                    num = int(match.group(1))
+                    raw_value = match.group(2)
+                    
+                    if 1 <= num <= len(transport_fields):
+                        cleaned_value = self.final_text_polish(self.clean_llm_output(raw_value))
+                        if cleaned_value and len(cleaned_value) >= 3:
+                            transport_data[transport_fields[num-1]] = cleaned_value
+            
+            # Fill any missing fields with defaults
+            for field in transport_fields:
+                if field not in transport_data:
+                    transport_data[field] = "Not available"
+            
+            return transport_data
+            
+        except Exception as e:
+            logger.error(f"[Transport LLM] Error: {e}")
+            return self.generate_basic_transport_classification(compound_data)
+
+    def generate_basic_transport_classification(self, compound_data):
+        """Fallback transport classification based on structural analysis"""
+        hazards = compound_data.get("structural_analysis", {}).get("hazards", [])
+        physical_props = compound_data.get("physical_properties", {})
+        
+        transport_data = {
+            "UN Number": "Not regulated",
+            "UN Proper Shipping Name": "Not applicable",
+            "Transport Hazard Class": "Not classified",
+            "Packing Group": "Not applicable",
+            "Environmental Hazards": "Assessment required",
+            "Marine Pollutant": "No",
+            "Special Precautions": "Follow general chemical transport guidelines"
+        }
+        
+        # Check for transport hazards
+        hazard_types = [h['hazard_type'] for h in hazards] if hazards else []
+        
+        if "Explosive" in hazard_types:
+            transport_data.update({
+                "Transport Hazard Class": "Class 1 (Explosives)",
+                "UN Proper Shipping Name": "Explosive substance, n.o.s.",
+                "Packing Group": "Depends on explosive classification",
+                "Special Precautions": "Handle with extreme care. Avoid shock, friction, and heat."
+            })
+        elif "Corrosive" in hazard_types:
+            transport_data.update({
+                "Transport Hazard Class": "Class 8 (Corrosive substances)",
+                "UN Proper Shipping Name": "Corrosive solid, n.o.s.",
+                "Packing Group": "II or III",
+                "Special Precautions": "Use corrosion-resistant packaging. Avoid contact with metals."
+            })
+        
+        # Check flash point for flammable classification
+        flash_point = physical_props.get("Flash Point", "")
+        if "°C" in flash_point:
+            try:
+                fp_match = re.search(r'(\d+)', flash_point)
+                if fp_match:
+                    fp_val = int(fp_match.group(1))
+                    if fp_val < 60:
+                        transport_data.update({
+                            "Transport Hazard Class": "Class 3 (Flammable liquids)",
+                            "UN Proper Shipping Name": "Flammable liquid, n.o.s.",
+                            "Packing Group": "II" if fp_val < 23 else "III",
+                            "Special Precautions": "Keep away from heat, sparks, and open flames."
+                        })
+            except:
+                pass
+        
+        return transport_data
+    
     
     # ===== UTILITY FUNCTIONS =====
     
@@ -1167,6 +1847,23 @@ class SDSDataFetcher:
                     logger.info(f"[ECHA GHS] Classification data merged")
             except Exception as e:
                 logger.error(f"[ECHA GHS] Error: {e}")
+                
+        try:
+            transport_data = self.generate_transport_classification_with_llm({
+                "basic_data": transport_data,
+                "structural_analysis": {"hazards": structural_hazards},
+                "physical_properties": data.get("physical_properties", {})
+            })
+            
+            # Merge transport data
+            for field, value in transport_data.items():
+                if data["transport"][field] == "Not available" and value != "Not available":
+                    data["transport"][field] = value
+            
+            logger.info(f"[Transport] Classification completed with {len(transport_data)} fields")
+            
+        except Exception as e:
+            logger.error(f"[Transport] Classification failed: {e}")
 
         # Validate all extracted data
         data = self.validate_extracted_data(data)
@@ -1275,6 +1972,14 @@ class SDSDataFetcher:
                         logger.info("[Data Fetcher] Extended PubChem data collected")
                 except Exception as e:
                     result["errors"].append(f"Extended PubChem data failed: {str(e)}")
+            
+            try:
+                if result["safety_data"]:
+                    result = self.enhance_data_with_llm(result)
+                    logger.info("[Data Fetcher] LLM enhancement completed")
+            except Exception as e:
+                result["errors"].append(f"LLM enhancement failed: {str(e)}")
+                logger.error(f"[Data Fetcher] LLM enhancement error: {str(e)}")
             
             logger.info(f"[Data Fetcher] Data collection completed. Sources used: {', '.join(result['data_sources'])}")
             
@@ -1482,5 +2187,4 @@ def predict_compound_toxicity(smiles):
     """
     fetcher = SDSDataFetcher()
     return fetcher.predict_toxicity_protx(smiles)
-
 
