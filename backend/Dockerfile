@@ -1,5 +1,24 @@
-# Use base image with conda
+# Use a base image with conda and Linux tools
 FROM continuumio/anaconda3
+
+# Install rdkit via conda-forge
+RUN conda install -c conda-forge rdkit -y && \
+    conda clean -a -y
+
+# Install system tool: wkhtmltopdf (needed for pdfkit)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        wkhtmltopdf \
+        libxrender1 \
+        libfontconfig1 \
+        libx11-dev \
+        libxext6 \
+        libxft2 \
+        libfreetype6 \
+        libpng16-16 \
+        zlib1g \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
 WORKDIR /app
@@ -7,18 +26,20 @@ WORKDIR /app
 # Copy requirements first
 COPY requirements.txt .
 
-# Install rdkit via conda-forge (critical!)
-RUN conda install -c conda-forge rdkit -y && \
-    conda clean -a -y
+# 🚨 CRITICAL: Upgrade pip, setuptools, and wheel BEFORE installing dependencies
+RUN pip install --upgrade pip setuptools wheel
 
-# Install Python dependencies
+# Now install your requirements safely
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy your code
+# Copy your application code
 COPY . .
 
-# Expose port
+# Ensure wkhtmltopdf is accessible to pdfkit
+RUN ln -sf /usr/bin/wkhtmltopdf /usr/local/bin/wkhtmltopdf || true
+
+# Expose port (Render uses PORT environment variable automatically)
 EXPOSE 10000
 
-# Run the app
-CMD exec gunicorn "main:app" "--bind=0.0.0.0:${PORT:-10000}" "--workers=2" "--timeout", "120"
+# Run the app with gunicorn
+CMD ["gunicorn", "main:app", "--bind", "0.0.0.0:$PORT", "--timeout", "120"]
