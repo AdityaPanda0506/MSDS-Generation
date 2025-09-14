@@ -40,7 +40,7 @@ COPY . .
 RUN ln -sf /usr/bin/wkhtmltopdf /usr/local/bin/wkhtmltopdf || true
 
 # Expose port (Render uses PORT environment variable automatically)
-EXPOSE 10000
+EXPOSE 5000
 
 # Run the app with gunicorn
 CMD ["gunicorn", "main:app", "--bind", "0.0.0.0:$PORT", "--timeout", "120"]
