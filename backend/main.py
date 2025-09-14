@@ -6,84 +6,34 @@ import logging
 from io import BytesIO
 from datetime import datetime
 import traceback
-from dotenv import load_dotenv
+from dotenv import load_env
 
-# Load environment variables
-load_dotenv()
+load_env()
 
 # Import the comprehensive SDS generator
-try:
-    from sds_generator import (
-        SDSGenerator, 
-        generate_sds_from_smiles, 
-        generate_sds_docx_from_smiles,
-        get_sds_section_names
-    )
-except ImportError as e:
-    logging.error(f"Failed to import SDS generator: {e}")
-    raise
+from sds_generator import (
+    SDSGenerator, 
+    generate_sds_from_smiles, 
+    generate_sds_docx_from_smiles,
+    get_sds_section_names
+)
 
 # Configure logging
-log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
 logging.basicConfig(
-    level=getattr(logging, log_level),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('logs/app.log') if os.path.exists('logs') else logging.StreamHandler()
-    ]
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
 # Initialize Flask app
 app = Flask(__name__)
+CORS(app, origins=[
+    "http://localhost:3000",
+    "https://medxai-sds-generator.vercel.app"
+]) # Restrict CORS to React frontend
 
-# Configure CORS
-cors_origins = os.getenv('CORS_ORIGINS', 'http://localhost:3000').split(',')
-CORS(app, origins=cors_origins, methods=['GET', 'POST'], allow_headers=['Content-Type'])
-
-# Initialize SDS Generator with error handling
-try:
-    sds_generator = SDSGenerator()
-    logger.info("SDS Generator initialized successfully")
-except Exception as e:
-    logger.error(f"Failed to initialize SDS Generator: {e}")
-    sds_generator = None
-
-
-@app.before_request
-def log_request_info():
-    """Log incoming requests for debugging"""
-    if not request.path.startswith('/api/health'):  # Don't log health checks
-        logger.info(f"Request: {request.method} {request.path} from {request.remote_addr}")
-
-
-@app.after_request
-def after_request(response):
-    """Add security headers and log responses"""
-    response.headers['X-Content-Type-Options'] = 'nosniff'
-    response.headers['X-Frame-Options'] = 'DENY'
-    response.headers['X-XSS-Protection'] = '1; mode=block'
-    return response
-
-
-@app.route('/', methods=['GET'])
-def root():
-    """Root endpoint with API information"""
-    return jsonify({
-        "service": "SDS Generation System",
-        "version": "3.0",
-        "status": "operational",
-        "endpoints": {
-            "health": "/api/health",
-            "validate": "/api/validate",
-            "generate_sds": "/api/sds",
-            "download_docx": "/api/sds/docx",
-            "download_json": "/api/sds/json",
-            "sections": "/api/sections"
-        },
-        "documentation": "POST SMILES string to generate comprehensive Safety Data Sheets"
-    })
+# Initialize SDS Generator
+sds_generator = SDSGenerator()
 
 
 @app.route('/api/health', methods=['GET'])
@@ -92,28 +42,18 @@ def health():
     try:
         # Test RDKit availability
         from rdkit import Chem
-        rdkit_version = Chem.rdMolDescriptors.CalcMolFormula(Chem.MolFromSmiles('CCO'))
+        rdkit_version = Chem.rdMolDescriptors.CalcMolFormula(Chem.MolFromSmiles('CCO'))  # Test basic functionality
         rdkit_status = "operational"
-        
-        # Test SDS generator
-        sds_status = "operational" if sds_generator is not None else "failed"
-        
-        # Check environment variables
-        env_status = {
-            "mistral_api_key": "configured" if os.getenv('MISTRAL_API_KEY') else "missing",
-            "port": os.getenv('PORT', '5000'),
-            "flask_env": os.getenv('FLASK_ENV', 'development')
-        }
-        
-        return jsonify({
-            "status": "healthy",
-            "service": "SDS Generation System",
-            "timestamp": datetime.now().isoformat(),
-            "components": {
-                "rdkit": rdkit_status,
-                "sds_generator": sds_status,
-                "environment": env_status
-            },
+    except Exception as e:
+        rdkit_status = f"error: {str(e)}"
+    
+    return jsonify({
+        "status": "ok",
+        "message": "SDS Generation Backend is running",
+        "timestamp": datetime.now().isoformat(),
+        "components": {
+            "rdkit": rdkit_status,
+            "sds_generator": "loaded",
             "endpoints": [
                 "/api/sds - Get SDS as JSON",
                 "/api/sds/docx - Download SDS as Word document", 
@@ -121,15 +61,8 @@ def health():
                 "/api/sections - Get section information",
                 "/api/validate - Validate SMILES string"
             ]
-        }), 200
-        
-    except Exception as e:
-        logger.error(f"Health check failed: {e}")
-        return jsonify({
-            "status": "unhealthy",
-            "error": str(e),
-            "timestamp": datetime.now().isoformat()
-        }), 500
+        }
+    }), 200
 
 
 @app.route('/api/validate', methods=['POST'])
@@ -137,15 +70,12 @@ def validate_smiles():
     """Validate SMILES string before processing"""
     try:
         data = request.get_json()
-        if not data:
-            return jsonify({"valid": False, "error": "JSON body required"}), 400
-            
-        smiles = data.get('smiles', '').strip()
+        smiles = data.get('smiles', '').strip() if data else request.args.get('smiles', '').strip()
         
         if not smiles:
             return jsonify({"valid": False, "error": "SMILES string is required"}), 400
         
-        # Validate with RDKit
+        # Import and validate with RDKit
         from rdkit import Chem
         mol = Chem.MolFromSmiles(smiles)
         
@@ -184,18 +114,16 @@ def get_sections():
         return jsonify({"error": "Failed to retrieve section information"}), 500
 
 
-@app.route('/api/sds', methods=['POST'])
+@app.route('/api/sds', methods=['GET', 'POST'])
 def get_sds():
     """Generate and return comprehensive SDS data as JSON"""
-    if sds_generator is None:
-        return jsonify({"error": "SDS Generator not available"}), 503
-        
     try:
-        data = request.get_json()
-        if not data:
-            return jsonify({"error": "JSON body with SMILES required"}), 400
-            
-        smiles = data.get('smiles', '').strip()
+        # Handle both GET and POST requests
+        if request.method == 'POST':
+            data = request.get_json()
+            smiles = data.get('smiles', '').strip() if data else ''
+        else:
+            smiles = request.args.get('smiles', '').strip()
         
         if not smiles:
             return jsonify({"error": "SMILES string is required"}), 400
@@ -227,8 +155,7 @@ def get_sds():
             }
         }
 
-        compound_name = sds.get('Section1', {}).get('data', {}).get('Product Identifier', 'Unknown')
-        logger.info(f"SDS generated successfully for: {compound_name}")
+        logger.info(f"SDS generated successfully for: {sds.get('Section1', {}).get('data', {}).get('Product Identifier', 'Unknown')}")
         return jsonify(response_data)
 
     except ImportError as e:
@@ -239,18 +166,16 @@ def get_sds():
         return jsonify({"error": "Failed to generate SDS", "details": str(e)}), 500
 
 
-@app.route('/api/sds/docx', methods=['POST'])
+@app.route('/api/sds/docx', methods=['GET', 'POST'])
 def download_docx():
     """Generate and download SDS as Word document"""
-    if sds_generator is None:
-        return jsonify({"error": "SDS Generator not available"}), 503
-        
     try:
-        data = request.get_json()
-        if not data:
-            return jsonify({"error": "JSON body with SMILES required"}), 400
-            
-        smiles = data.get('smiles', '').strip()
+        # Handle both GET and POST requests
+        if request.method == 'POST':
+            data = request.get_json()
+            smiles = data.get('smiles', '').strip() if data else ''
+        else:
+            smiles = request.args.get('smiles', '').strip()
 
         if not smiles:
             return jsonify({"error": "SMILES string is required"}), 400
@@ -275,7 +200,7 @@ def download_docx():
         if sds and "Section1" in sds:
             compound_name = sds["Section1"]["data"].get("Product Identifier", "Unknown_Compound")
         
-        # Clean filename
+        # Clean filename (remove invalid characters)
         safe_compound_name = "".join(c for c in compound_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
         filename = f"SDS_{safe_compound_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx"
 
@@ -288,23 +213,24 @@ def download_docx():
             mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
 
+    except ImportError as e:
+        logger.error(f"Import error for DOCX: {str(e)}")
+        return jsonify({"error": "Required dependencies not available", "details": str(e)}), 500
     except Exception as e:
         logger.error(f"DOCX generation error: {str(e)}\n{traceback.format_exc()}")
         return jsonify({"error": "Failed to generate Word document", "details": str(e)}), 500
 
 
-@app.route('/api/sds/json', methods=['POST'])
+@app.route('/api/sds/json', methods=['GET', 'POST'])
 def download_json():
     """Generate and download SDS as JSON file"""
-    if sds_generator is None:
-        return jsonify({"error": "SDS Generator not available"}), 503
-        
     try:
-        data = request.get_json()
-        if not data:
-            return jsonify({"error": "JSON body with SMILES required"}), 400
-            
-        smiles = data.get('smiles', '').strip()
+        # Handle both GET and POST requests
+        if request.method == 'POST':
+            data = request.get_json()
+            smiles = data.get('smiles', '').strip() if data else ''
+        else:
+            smiles = request.args.get('smiles', '').strip()
 
         if not smiles:
             return jsonify({"error": "SMILES string is required"}), 400
@@ -358,6 +284,45 @@ def download_json():
         return jsonify({"error": "Failed to generate JSON export", "details": str(e)}), 500
 
 
+@app.route('/api/sds/section/<int:section_num>', methods=['GET'])
+def get_sds_section(section_num):
+    """Get specific SDS section data"""
+    try:
+        if section_num < 1 or section_num > 16:
+            return jsonify({"error": "Section number must be between 1 and 16"}), 400
+
+        smiles = request.args.get('smiles', '').strip()
+        if not smiles:
+            return jsonify({"error": "SMILES string is required"}), 400
+
+        # Validate SMILES
+        from rdkit import Chem
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            return jsonify({"error": "Invalid SMILES format"}), 400
+
+        # Generate full SDS (cached approach would be better for production)
+        sds = generate_sds_from_smiles(smiles)
+        if sds is None:
+            return jsonify({"error": "Failed to generate SDS"}), 500
+
+        section_key = f"Section{section_num}"
+        section_data = sds.get(section_key)
+        
+        if not section_data:
+            return jsonify({"error": f"Section {section_num} not found"}), 404
+
+        return jsonify({
+            "section_number": section_num,
+            "section": section_data,
+            "smiles": smiles
+        })
+
+    except Exception as e:
+        logger.error(f"Section retrieval error: {str(e)}")
+        return jsonify({"error": "Failed to retrieve section", "details": str(e)}), 500
+
+
 @app.errorhandler(404)
 def not_found(error):
     """Handle 404 errors"""
@@ -366,10 +331,11 @@ def not_found(error):
         "available_endpoints": [
             "GET /api/health",
             "POST /api/validate", 
-            "POST /api/sds",
-            "POST /api/sds/docx",
-            "POST /api/sds/json",
-            "GET /api/sections"
+            "GET|POST /api/sds",
+            "GET|POST /api/sds/docx",
+            "GET|POST /api/sds/json",
+            "GET /api/sections",
+            "GET /api/sds/section/<int:section_num>"
         ]
     }), 404
 
@@ -385,31 +351,27 @@ def internal_error(error):
 
 
 if __name__ == '__main__':
-    # Ensure necessary directories exist
+    # Ensure temp directory exists (for any temporary file operations)
     os.makedirs('temp', exist_ok=True)
-    os.makedirs('logs', exist_ok=True)
-    
-    port = int(os.getenv("PORT", 5000))
     
     print("=" * 60)
     print("🧪 SDS Generation System Backend")
     print("=" * 60)
-    print(f"✅ Backend running at http://0.0.0.0:{port}")
-    print(f"🎯 Environment: {os.getenv('FLASK_ENV', 'development')}")
+    print("✅ Backend running at http://localhost:5000")
+    print("🎯 React frontend should connect to http://localhost:5000")
     print("📋 Available endpoints:")
-    print("   • GET  / - Service information")
     print("   • GET  /api/health - Health check")
     print("   • POST /api/validate - Validate SMILES")
-    print("   • POST /api/sds - Get SDS as JSON")
-    print("   • POST /api/sds/docx - Download Word document")
-    print("   • POST /api/sds/json - Download JSON file")
+    print("   • GET  /api/sds - Get SDS as JSON")
+    print("   • GET  /api/sds/docx - Download Word document")
+    print("   • GET  /api/sds/json - Download JSON file")
     print("   • GET  /api/sections - Get section info")
     print("=" * 60)
     
     # Run Flask app
     app.run(
-        host='0.0.0.0', 
-        port=port,
-        debug=False,
-        threaded=True
+    host='0.0.0.0', 
+    port=int(os.getenv("PORT", 5000)), 
+    debug=False,  # Never enable debug in production
+    threaded=True
     )
