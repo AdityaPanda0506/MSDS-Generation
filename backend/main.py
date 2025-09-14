@@ -6,9 +6,9 @@ import logging
 from io import BytesIO
 from datetime import datetime
 import traceback
-from dotenv import load_env
+from dotenv import load_dotenv
 
-load_env()
+load_dotenv()
 
 # Import the comprehensive SDS generator
 from sds_generator import (
