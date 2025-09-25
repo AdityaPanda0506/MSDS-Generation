@@ -22,7 +22,6 @@ import os
 # from mistralai.client import MistralClient
 # from mistralai.models.chat_completion import ChatMessage
 from mistralai import Mistral
-import google.generativeai as genai
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -51,7 +50,7 @@ class SDSDataFetcher:
         try:
             api_key = os.getenv('MISTRAL_API_KEY')
             if api_key:
-                self.gemini_client = genai.GenerativeModel('gemini-1.5-flash')
+                self.mistral_client = Mistral(api_key=api_key)
                 logger.info("[Mistral] Client initialized successfully")
             else:
                 logger.warning("[Mistral] API key not found in environment variables")
@@ -120,8 +119,14 @@ class SDSDataFetcher:
                 try:
                     messages = [{"role": "user", "content": batch_prompt}]
                     
-                    response = self.gemini_client.generate_content(batch_prompt)
-                    response_text = response.text 
+                    response = self.mistral_client.chat.complete(
+                        model="mistral-large-latest",
+                        messages=messages,
+                        temperature=0.1,  # Very low temperature for consistency
+                        max_tokens=1200
+                    )
+                    
+                    response_text = response.choices[0].message.content
                     
                     # Parse numbered responses
                     lines = response_text.split('\n')
@@ -2182,6 +2187,4 @@ def predict_compound_toxicity(smiles):
     """
     fetcher = SDSDataFetcher()
     return fetcher.predict_toxicity_protx(smiles)
-
-
 
