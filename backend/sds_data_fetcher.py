@@ -151,7 +151,7 @@ class SDSDataFetcher:
                                     field_path = field_mapping[num]
                                     generated_data[field_path] = cleaned_value
                     
-                    time.sleep(0.5)  # Rate limiting
+                    time.sleep(3)  # Rate limiting
                     
                 except Exception as e:
                     logger.error(f"[Mistral] Error generating batch: {e}")
@@ -2187,4 +2187,5 @@ def predict_compound_toxicity(smiles):
     """
     fetcher = SDSDataFetcher()
     return fetcher.predict_toxicity_protx(smiles)
+
 
