@@ -1,5 +1,5 @@
 # Use a base image with conda and Linux tools
-FROM continuumio/anaconda3
+FROM continuumio/minianaconda3:latest
 
 # Install rdkit via conda-forge
 RUN conda install -c conda-forge rdkit -y && \
@@ -17,6 +17,8 @@ RUN apt-get update && \
         libfreetype6 \
         libpng16-16 \
         zlib1g \
+        fonts-liberation \
+        xvfb \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -44,5 +46,5 @@ EXPOSE 5000
 
 # Run the app with gunicorn
 # CMD ["gunicorn", "main:app", "--bind", "0.0.0.0:$PORT", "--timeout", "120"]
-CMD exec gunicorn "main:app" "--bind=0.0.0.0:${PORT:-5000}" "--workers=2" "--timeout" "120"
+CMD exec gunicorn "main:app" "--bind=0.0.0.0:${PORT:-5000}" "--workers=2" "--timeout" "120" "--threads=4"
 
