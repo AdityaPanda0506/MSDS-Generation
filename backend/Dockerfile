@@ -46,5 +46,5 @@ EXPOSE 5000
 
 # Run the app with gunicorn
 # CMD ["gunicorn", "main:app", "--bind", "0.0.0.0:$PORT", "--timeout", "120"]
-CMD exec gunicorn "main:app" "--bind=0.0.0.0:${PORT:-5000}" "--workers=2" "--timeout" "120" "--threads=4"
+CMD exec gunicorn "main:app" "--bind=0.0.0.0:${PORT:-5000}" "--workers=2" "--timeout" "300" "--threads=4" "--preload"
 
