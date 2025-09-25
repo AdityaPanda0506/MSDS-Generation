@@ -73,7 +73,6 @@ class SDSDataFetcher:
         # Initialize Mistral client
         self.mistral_client = None
         self.setup_mistral_client()
-        self.setup_api_monitoring()
     
     def setup_mistral_client(self):
         """Initialize Mistral AI client if API key is available"""
@@ -2239,41 +2238,4 @@ def predict_compound_toxicity(smiles):
     """
     fetcher = SDSDataFetcher()
     return fetcher.predict_toxicity_protx(smiles)
-
-def setup_api_monitoring(self):
-    """Setup API usage monitoring"""
-    self.api_calls = 0
-    self.start_time = datetime.now()
-    self.last_call_time = None
-
-def log_api_usage(self):
-    """Log API usage statistics"""
-    if hasattr(self, 'api_calls'):
-        current_time = datetime.now()
-        elapsed = (current_time - self.start_time).total_seconds()
-        calls_per_minute = (self.api_calls / elapsed) * 60 if elapsed > 0 else 0
-        
-        logger.info(f"[API Monitor] Calls: {self.api_calls}, "
-                   f"Elapsed: {elapsed:.1f}s, "
-                   f"Rate: {calls_per_minute:.2f} calls/min")
-
-def should_throttle(self):
-    """Determine if we should throttle based on recent usage"""
-    if not hasattr(self, 'last_call_time') or not self.last_call_time:
-        return False
-    
-    time_since_last = (datetime.now() - self.last_call_time).total_seconds()
-    
-    # If we've made more than 8 calls in the last minute, throttle
-    recent_calls = getattr(self, 'recent_calls', 0)
-    if recent_calls > 8 and time_since_last < 60:
-        wait_time = 60 - time_since_last + random.uniform(5, 15)
-        logger.warning(f"[Throttle] Rate limit approaching. Waiting {wait_time:.1f}s")
-        time.sleep(wait_time)
-        self.recent_calls = 0
-        return True
-    
-    return False
-
-
 
