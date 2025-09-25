@@ -1,5 +1,5 @@
 # Use a base image with conda and Linux tools
-FROM continuumio/minianaconda3:latest
+FROM continuumio/anaconda3
 
 # Install rdkit via conda-forge
 RUN conda install -c conda-forge rdkit -y && \
