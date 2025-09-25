@@ -29,35 +29,6 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-import random
-import time
-from functools import wraps
-
-def retry_with_exponential_backoff(max_retries=5, initial_delay=2, max_delay=120, backoff_factor=2):
-    """Decorator for exponential backoff with jitter"""
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            retries = 0
-            while retries <= max_retries:
-                try:
-                    return func(*args, **kwargs)
-                except Exception as e:
-                    if "service_tier_capacity_exceeded" in str(e) or "429" in str(e) or "3505" in str(e):
-                        if retries >= max_retries:
-                            logger.error(f"[Mistral] Max retries ({max_retries}) exceeded. Last error: {e}")
-                            raise
-                        
-                        # Calculate delay with exponential backoff and jitter
-                        delay = min(initial_delay * (backoff_factor ** retries) + random.uniform(0, 1), max_delay)
-                        logger.warning(f"[Mistral] Rate limit hit (attempt {retries + 1}/{max_retries}). Waiting {delay:.1f}s")
-                        time.sleep(delay)
-                        retries += 1
-                    else:
-                        raise e
-            return func(*args, **kwargs)
-        return wrapper
-    return decorator
 
 class SDSDataFetcher:
     """
@@ -88,7 +59,7 @@ class SDSDataFetcher:
             self.mistral_client = None
 
     def generate_missing_data_with_llm(self, compound_data, missing_fields):
-        """Enhanced version with robust rate limiting and error handling"""
+        """Use Mistral LLM to generate missing SDS data with improved cleaning"""
         if not self.mistral_client or not missing_fields:
             return {}
 
@@ -132,12 +103,10 @@ class SDSDataFetcher:
             
             generated_data = {}
             
-            # Process ALL missing fields but with better batching and rate control
-            field_batches = [missing_fields[i:i+2] for i in range(0, len(missing_fields), 2)]  # Smaller batches
+            # Process missing fields in smaller batches for better results
+            field_batches = [missing_fields[i:i+3] for i in range(0, len(missing_fields), 3)]
             
-            for batch_idx, batch in enumerate(field_batches):
-                logger.info(f"[Mistral] Processing batch {batch_idx + 1}/{len(field_batches)} with {len(batch)} fields")
-                
+            for batch in field_batches:
                 batch_prompt = context_prompt + "\n"
                 field_mapping = {}  # Track field order
                 
@@ -148,68 +117,53 @@ class SDSDataFetcher:
                 batch_prompt += f"\nProvide exactly one clean value per line, numbered 1-{len(batch)}:"
                 
                 try:
-                    # Apply rate limiting between batches
-                    if batch_idx > 0:
-                        inter_batch_delay = random.uniform(3, 8)  # 3-8 seconds between batches
-                        logger.info(f"[Mistral] Waiting {inter_batch_delay:.1f}s before next batch")
-                        time.sleep(inter_batch_delay)
+                    messages = [{"role": "user", "content": batch_prompt}]
                     
-                    # Make API call with retry mechanism
-                    response = self._make_mistral_api_call_with_retry(batch_prompt)
+                    response = self.mistral_client.chat.complete(
+                        model="mistral-large-latest",
+                        messages=messages,
+                        temperature=0.1,  # Very low temperature for consistency
+                        max_tokens=1200
+                    )
                     
-                    if response:
-                        response_text = response.choices[0].message.content
+                    response_text = response.choices[0].message.content
+                    
+                    # Parse numbered responses
+                    lines = response_text.split('\n')
+                    for line in lines:
+                        line = line.strip()
+                        if not line:
+                            continue
                         
-                        # Parse numbered responses
-                        lines = response_text.split('\n')
-                        for line in lines:
-                            line = line.strip()
-                            if not line:
-                                continue
+                        # Look for numbered format: "1. value" or "1: value"
+                        match = re.match(r'^(\d+)[\.\:\)]\s*(.+)$', line)
+                        if match:
+                            num = int(match.group(1))
+                            raw_value = match.group(2)
                             
-                            # Look for numbered format: "1. value" or "1: value"
-                            match = re.match(r'^(\d+)[\.\:\)]\s*(.+)$', line)
-                            if match:
-                                num = int(match.group(1))
-                                raw_value = match.group(2)
+                            if num in field_mapping:
+                                # Apply comprehensive cleaning - multiple passes
+                                cleaned_value = self.clean_llm_output(raw_value)
+                                cleaned_value = self.clean_llm_output(cleaned_value)  # Second pass
+                                cleaned_value = self.final_text_polish(cleaned_value)  # Final polish
                                 
-                                if num in field_mapping:
-                                    # Apply comprehensive cleaning - multiple passes
-                                    cleaned_value = self.clean_llm_output(raw_value)
-                                    cleaned_value = self.clean_llm_output(cleaned_value)  # Second pass
-                                    cleaned_value = self.final_text_polish(cleaned_value)  # Final polish
-                                    
-                                    if cleaned_value and len(cleaned_value) >= 5:
-                                        field_path = field_mapping[num]
-                                        generated_data[field_path] = cleaned_value
-                                        logger.debug(f"[Mistral] Successfully generated value for {field_path}")
+                                if cleaned_value and len(cleaned_value) >= 5:
+                                    field_path = field_mapping[num]
+                                    generated_data[field_path] = cleaned_value
+                    
+                    time.sleep(0.5)  # Rate limiting
                     
                 except Exception as e:
-                    logger.error(f"[Mistral] Error generating batch {batch_idx + 1}: {e}")
-                    # Continue with next batch instead of stopping completely
+                    logger.error(f"[Mistral] Error generating batch: {e}")
                     continue
             
-            logger.info(f"[Mistral] Generated {len(generated_data)} cleaned field values out of {len(missing_fields)} requested")
+            logger.info(f"[Mistral] Generated {len(generated_data)} cleaned field values")
             return generated_data
             
         except Exception as e:
             logger.error(f"[Mistral] Error in generate_missing_data_with_llm: {e}")
             return {}
 
-    @retry_with_exponential_backoff(max_retries=5, initial_delay=3, max_delay=120)
-    def _make_mistral_api_call_with_retry(self, prompt):
-        """Make API call with built-in retry logic"""
-        messages = [{"role": "user", "content": prompt}]
-        
-        response = self.mistral_client.chat.complete(
-            model="mistral-large-latest",
-            messages=messages,
-            temperature=0.1,
-            max_tokens=1200,
-            timeout=30  # Add timeout
-        )
-        
-        return response
     def prioritize_missing_fields(self, missing_fields):
         """Prioritize missing fields by importance for SDS compliance including transport"""
         # Critical fields that are legally required
@@ -575,11 +529,13 @@ class SDSDataFetcher:
 
 
     def enhance_data_with_llm(self, comprehensive_data):
-        """Enhanced main method with robust error handling and rate management"""
+        """Updated main method to enhance SDS data with improved LLM processing"""
         if not self.mistral_client:
             logger.info("[Mistral] Client not available, skipping LLM enhancement")
+            # Apply fallback values for critical fields
             return self.enhance_missing_field_coverage(comprehensive_data)
         
+        # Focus on all sections, not just priority ones
         safety_data = comprehensive_data.get("safety_data", {})
         
         # Find ALL missing fields
@@ -591,41 +547,34 @@ class SDSDataFetcher:
         
         logger.info(f"[Mistral] Found {len(all_missing)} missing fields to enhance")
         
-        try:
-            # Use priority-based processing
-            generated_data = self.process_fields_with_priority(comprehensive_data, all_missing)
-            
-            if generated_data:
-                # Apply generated data with validation
-                applied_count = self.apply_generated_data(safety_data, generated_data)
-                comprehensive_data["safety_data"] = safety_data
-                
-                # Track LLM usage
-                if "data_sources" not in comprehensive_data:
-                    comprehensive_data["data_sources"] = []
-                comprehensive_data["data_sources"].append("Mistral LLM Enhancement")
-                
-                # Add detailed metadata about LLM enhancement
-                comprehensive_data["llm_enhancement"] = {
-                    "fields_generated": len(generated_data),
-                    "fields_applied": applied_count,
-                    "total_fields_requested": len(all_missing),
-                    "success_rate": f"{(applied_count/len(all_missing))*100:.1f}%",
-                    "model": "mistral-large-latest",
-                    "timestamp": datetime.now().isoformat(),
-                    "coverage_improvement": f"{applied_count}/{len(all_missing)} missing fields filled",
-                    "note": "LLM-generated fields are marked for expert review"
-                }
-                
-                logger.info(f"[Mistral] Applied {applied_count} generated fields out of {len(generated_data)} generated")
-            else:
-                logger.warning("[Mistral] No data was generated by LLM")
-            
-        except Exception as e:
-            logger.error(f"[Mistral] Critical error in LLM enhancement: {e}")
-            logger.info("[Mistral] Falling back to rule-based enhancement")
+        # Generate missing data with enhanced processing
+        generated_data = self.generate_missing_data_with_llm(comprehensive_data, all_missing)
         
-        # Always apply fallback values for any remaining critical missing fields
+        if generated_data:
+            # Apply generated data with validation
+            applied_count = self.apply_generated_data(safety_data, generated_data)
+            comprehensive_data["safety_data"] = safety_data
+            
+            # Track LLM usage
+            if "data_sources" not in comprehensive_data:
+                comprehensive_data["data_sources"] = []
+            comprehensive_data["data_sources"].append("Mistral LLM Enhancement")
+            
+            # Add detailed metadata about LLM enhancement
+            comprehensive_data["llm_enhancement"] = {
+                "fields_generated": len(generated_data),
+                "fields_applied": applied_count,
+                "model": "mistral-large-latest",
+                "timestamp": datetime.now().isoformat(),
+                "coverage_improvement": f"{applied_count}/{len(all_missing)} missing fields filled",
+                "note": "LLM-generated fields are marked for expert review"
+            }
+            
+            logger.info(f"[Mistral] Applied {applied_count} generated fields out of {len(generated_data)} generated")
+        else:
+            logger.warning("[Mistral] No data was generated by LLM")
+        
+        # Apply fallback values for any remaining critical missing fields
         comprehensive_data = self.enhance_missing_field_coverage(comprehensive_data)
         
         return comprehensive_data
