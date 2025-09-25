@@ -12,4 +12,4 @@ python-docx
 python-dotenv
 mistralai
 pdfkit
-google-generative-ai>=0.7.0
+google-generativeai>=0.7.0
