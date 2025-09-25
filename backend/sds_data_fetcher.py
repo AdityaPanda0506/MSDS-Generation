@@ -120,7 +120,7 @@ class SDSDataFetcher:
                     messages = [{"role": "user", "content": batch_prompt}]
                     
                     response = self.mistral_client.chat.complete(
-                        model="mistral-large-latest",
+                        model="mistral-small",
                         messages=messages,
                         temperature=0.1,  # Very low temperature for consistency
                         max_tokens=1200
@@ -564,7 +564,7 @@ class SDSDataFetcher:
             comprehensive_data["llm_enhancement"] = {
                 "fields_generated": len(generated_data),
                 "fields_applied": applied_count,
-                "model": "mistral-large-latest",
+                "model": "mistral-small",
                 "timestamp": datetime.now().isoformat(),
                 "coverage_improvement": f"{applied_count}/{len(all_missing)} missing fields filled",
                 "note": "LLM-generated fields are marked for expert review"
@@ -615,7 +615,7 @@ class SDSDataFetcher:
             messages = [{"role": "user", "content": context_prompt}]
             
             response = self.mistral_client.chat.complete(
-                model="mistral-large-latest",
+                model="mistral-small",
                 messages=messages,
                 temperature=0.1,
                 max_tokens=800
@@ -2187,5 +2187,6 @@ def predict_compound_toxicity(smiles):
     """
     fetcher = SDSDataFetcher()
     return fetcher.predict_toxicity_protx(smiles)
+
 
 
